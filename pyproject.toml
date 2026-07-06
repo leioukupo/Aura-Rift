@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aura-rift"
+version = "0.1.0"
+description = "Linux ComfyUI launcher inspired by ComfyUI-Aki."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "PySide6>=6.7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.5",
+]
+
+[project.scripts]
+aura-rift = "aura_rift.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
