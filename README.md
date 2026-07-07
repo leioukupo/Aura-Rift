@@ -22,6 +22,7 @@ Aura-Rift 是一个面向 Linux 的 ComfyUI 启动器，界面参考 ComfyUI-Aki
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
+apt install libxcb-cursor0
 python -m aura_rift
 ```
 
