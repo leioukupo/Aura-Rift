@@ -9,6 +9,7 @@ def stylesheet(theme: str) -> str:
         QMainWindow, QWidget { background: #202020; color: #f0f0f0; }
         #titleBar { background: #1f1f1f; border-bottom: 1px solid #2f2f2f; }
         #sideBar { background: #1b1b1b; border-right: 1px solid #303030; }
+        #settingsNav { background: #1f1f1f; border-right: 1px solid #303030; }
         #navButton { border: 0; border-radius: 6px; color: #f2f2f2; padding: 8px 4px; text-align: center; }
         #navButton:hover { background: #303030; }
         #navButton:checked { background: #4a4a4a; border-left: 4px solid #cfcfcf; }
@@ -45,6 +46,7 @@ def stylesheet(theme: str) -> str:
         QMainWindow, QWidget { background: #f4f4f4; color: #1e1e1e; }
         #titleBar { background: #ffffff; border-bottom: 1px solid #dddddd; }
         #sideBar { background: #fdfdfd; border-right: 1px solid #dddddd; }
+        #settingsNav { background: #fafafa; border-right: 1px solid #dddddd; }
         #navButton { border: 0; border-radius: 6px; color: #222222; padding: 8px 4px; }
         #navButton:hover { background: #eeeeee; }
         #navButton:checked { background: #e2e2e2; border-left: 4px solid #555555; }

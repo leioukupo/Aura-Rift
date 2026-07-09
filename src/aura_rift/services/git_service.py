@@ -110,6 +110,31 @@ class GitService:
             )
         return items
 
+    def tags(self, limit: int = 50) -> list[CommitInfo]:
+        self.ensure_repo()
+        current = self.current_commit()
+        fmt = "%(refname:short)|%(objectname)|%(creatordate:iso-strict)|%(contents:subject)"
+        output = _run_git(
+            self.repo_path,
+            ["for-each-ref", "--sort=-creatordate", f"--count={limit}", f"--format={fmt}", "refs/tags"],
+        )
+        items: list[CommitInfo] = []
+        for line in output.splitlines():
+            parts = line.split("|", 3)
+            if len(parts) != 4:
+                continue
+            tag_name, full_hash, date, subject = parts
+            items.append(
+                CommitInfo(
+                    short_hash=tag_name,
+                    full_hash=full_hash,
+                    date=date.replace("T", " ").split("+")[0],
+                    subject=subject or tag_name,
+                    current=full_hash == current,
+                )
+            )
+        return items
+
     def fetch(self) -> None:
         self.ensure_repo()
         _run_git(self.repo_path, ["fetch", "--all", "--tags", "--prune"], timeout=180)

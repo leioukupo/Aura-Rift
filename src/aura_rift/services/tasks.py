@@ -90,6 +90,7 @@ class TaskHandle(QObject):
         self.worker.cancel()
 
     def _finish(self, ok: bool, message: str) -> None:
-        self.finished.emit(ok, message)
         self.thread.quit()
+        self.thread.wait()
+        self.finished.emit(ok, message)
 

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 
 ZH_CN: dict[str, str] = {
+    # App
     "app.title": "Aura-Rift 启动器",
+    # Navigation
     "nav.launch": "一键启动",
     "nav.advanced": "高级选项",
     "nav.versions": "版本管理",
@@ -10,6 +12,7 @@ ZH_CN: dict[str, str] = {
     "nav.console": "控制台",
     "nav.settings": "设置",
     "nav.theme": "灯泡",
+    # Common buttons
     "button.start": "一键启动",
     "button.stop": "终止进程",
     "button.install": "安装",
@@ -17,6 +20,95 @@ ZH_CN: dict[str, str] = {
     "button.refresh": "刷新",
     "button.choose": "选择",
     "button.save": "保存",
+    "button.show_command": "显示启动命令",
+    "button.reset": "恢复默认设置",
+    "button.save_advanced": "保存高级选项",
+    # Launch page
+    "launch.subtitle": "让 Linux 下的 ComfyUI 启动、升级和插件管理更顺手。",
+    "launch.comfy_dir": "ComfyUI 目录",
+    "launch.choose_existing": "选择已有",
+    "launch.new_install": "新建安装",
+    "launch.save_path": "保存路径",
+    "launch.folders": "文件夹",
+    "folder.root": "根目录",
+    "folder.custom_nodes": "自定义节点",
+    "folder.input": "输入图片",
+    "folder.output": "输出图片",
+    "folder.models": "模型",
+    "launch.announcement": "公告",
+    # Advanced page
+    "adv.title": "高级选项",
+    "maint.title": "环境维护",
+    "adv.vram": "显存优化",
+    "adv.vram.desc": "选择 ComfyUI 显存策略",
+    "adv.attention": "Cross-Attention 优化方案",
+    "adv.attention.desc": "参考 ComfyUI 启动参数",
+    "adv.precision": "计算精度设置",
+    "adv.precision.desc": "平衡速度、显存占用与兼容性",
+    "adv.preview": "预览图生成模式",
+    "adv.preview.desc": "选择生成过程中的预览算法",
+    "adv.cpu_vae": "使用 CPU 运行 VAE",
+    "adv.cpu_vae.desc": "显存紧张时可启用，但速度会下降",
+    "adv.cache": "缓存策略",
+    "adv.cache.desc": "管理模型在显存中的缓存方式",
+    "adv.smart_memory": "禁用智能内存管理",
+    "adv.smart_memory.desc": "关闭后 ComfyUI 会手动管理显存上下文，显存占用更保守",
+    "adv.vae_precision": "VAE 精度",
+    "adv.vae_precision.desc": "VAE 解码精度，BF16/FP16 省显存但略有精度损失",
+    "adv.text_enc_precision": "文本编码器精度",
+    "adv.text_enc_precision.desc": "FP8 可大幅降低显存，需硬件支持",
+    "adv.cuda_malloc": "使用 CUDA Malloc",
+    "adv.cuda_malloc.desc": "启用后可能提升速度，部分环境可能不稳定",
+    "adv.network": "网络、目录与附加参数",
+    "adv.listen": "允许局域网访问",
+    "adv.port": "端口",
+    "adv.cors": "CORS Header",
+    "adv.output_dir": "输出目录",
+    "adv.input_dir": "输入目录",
+    "adv.extra_args": "额外参数",
+    "adv.cors.hint": "留空则不启用 CORS，例如 *",
+    "adv.output_dir.hint": "留空使用默认 output 目录",
+    "adv.input_dir.hint": "留空使用默认 input 目录",
+    "adv.extra_args.hint": "额外 ComfyUI 参数，例如 --front-end-version Comfy-Org/ComfyUI_frontend@latest",
+    # Version page
+    "ver.core": "内核",
+    "ver.extensions": "扩展",
+    "ver.install": "安装新扩展",
+    "ver.refresh_list": "刷新列表",
+    "ver.update_all": "一键更新",
+    "ver.channel": "版本通道",
+    "ver.channel.stable": "稳定版",
+    "ver.channel.dev": "开发版",
+    "ver.update_selected": "更新选中扩展",
+    "ver.open_selected": "打开选中扩展目录",
+    # Settings page
+    "settings.general": "一般设置",
+    "settings.environment": "环境设置",
+    "settings.proxy": "代理设置",
+    "settings.about": "关于",
+    "settings.mode": "配置模式",
+    "settings.mode.desc": "专家模式会显示分支和提交切换能力",
+    "settings.mode.beginner": "新手",
+    "settings.mode.expert": "专家",
+    "settings.language": "界面语言",
+    "settings.language.desc": "首版仅提供中文，已预留后续多语言结构",
+    "settings.comfy_dir": "ComfyUI 目录",
+    "settings.comfy_dir.desc": "选择已有项目或新建安装目标",
+    "settings.python_override": "Python 路径覆盖",
+    "settings.python_override.desc": "用于兼容已有 Python/venv，Git 路径覆盖已在 Linux 版删除",
+    "settings.venv_manager": "虚拟环境管理器",
+    "settings.venv_manager.desc": "选择创建环境和管理依赖的方式",
+    "settings.proxy_title": "代理与镜像设置",
+    "settings.pypi_mirror": "使用 PyPI 国内镜像",
+    "settings.github_proxy": "GitHub 镜像前缀",
+    "settings.github_proxy.hint": "GitHub 镜像前缀，例如 https://gh-proxy.com/",
+    "settings.save_general": "保存设置",
+    "settings.save_env": "保存环境设置",
+    "settings.save_proxy": "保存代理设置",
+    # Console
+    "console.idle": "未运行",
+    # Tools
+    "tools.title": "小工具",
 }
 
 
@@ -27,4 +119,3 @@ class Translator:
 
     def tr(self, key: str, default: str | None = None) -> str:
         return self._catalogs.get(self.language, ZH_CN).get(key, default or key)
-

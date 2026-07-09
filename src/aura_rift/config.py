@@ -40,6 +40,14 @@ class LaunchOptions:
     preview_method: str = "auto"
     cpu_vae: bool = False
     disable_auto_launch: bool = False
+    cache_strategy: str = "auto"
+    disable_smart_memory: bool = False
+    vae_precision: str = "auto"
+    text_enc_precision: str = "auto"
+    cuda_malloc: bool = False
+    enable_cors: str = ""
+    output_directory: str = ""
+    input_directory: str = ""
     extra_args: str = ""
 
     def to_args(self) -> list[str]:
@@ -77,6 +85,41 @@ class LaunchOptions:
             args.extend(["--preview-method", self.preview_method])
         if self.disable_auto_launch:
             args.append("--disable-auto-launch")
+
+        cache_flags = {
+            "classic": "--cache-classic",
+            "lru": "--cache-lru",
+            "none": "--cache-none",
+        }
+        if self.cache_strategy in cache_flags:
+            args.append(cache_flags[self.cache_strategy])
+        if self.disable_smart_memory:
+            args.append("--disable-smart-memory")
+
+        vae_flags = {
+            "bf16": "--bf16-vae",
+            "fp16": "--fp16-vae",
+            "fp32": "--fp32-vae",
+        }
+        if self.vae_precision in vae_flags:
+            args.append(vae_flags[self.vae_precision])
+
+        text_enc_flags = {
+            "e4m3fn": "--fp8_e4m3fn-text-enc",
+            "e5m2": "--fp8_e5m2-text-enc",
+        }
+        if self.text_enc_precision in text_enc_flags:
+            args.append(text_enc_flags[self.text_enc_precision])
+
+        if self.cuda_malloc:
+            args.append("--cuda-malloc")
+        if self.enable_cors.strip():
+            args.extend(["--enable-cors-header", self.enable_cors.strip()])
+        if self.output_directory.strip():
+            args.extend(["--output-directory", self.output_directory.strip()])
+        if self.input_directory.strip():
+            args.extend(["--input-directory", self.input_directory.strip()])
+
         if self.extra_args.strip():
             args.extend(shlex.split(self.extra_args))
         return args
@@ -107,13 +150,14 @@ class AppConfig:
     theme: str = "dark"
     language: str = "zh_CN"
     expert_mode: bool = False
+    venv_manager: str = "venv"
     launch: LaunchOptions = field(default_factory=LaunchOptions)
     network: NetworkOptions = field(default_factory=NetworkOptions)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
         cfg = cls()
-        for key in ("comfy_path", "python_path_override", "theme", "language", "expert_mode"):
+        for key in ("comfy_path", "python_path_override", "theme", "language", "expert_mode", "venv_manager"):
             if key in data:
                 setattr(cfg, key, data[key])
         if isinstance(data.get("launch"), dict):

@@ -3,8 +3,8 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QFont, QTextCursor
+from PySide6.QtCore import QByteArray, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -26,8 +26,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QSplitter,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -49,7 +51,6 @@ from aura_rift.i18n import Translator
 from aura_rift.services import environment
 from aura_rift.services.comfy import (
     ComfyProcess,
-    command_environment,
     create_venv_commands,
     install_comfy_commands,
     install_manager_commands,
@@ -58,8 +59,34 @@ from aura_rift.services.comfy import (
 )
 from aura_rift.services.files import directory_size_hint, ensure_dir, open_path
 from aura_rift.services.git_service import DirtyRepositoryError, GitError, GitService
+from aura_rift.services.registry import ExtensionEntry, get_extensions, mark_installed, search_entries
 from aura_rift.services.tasks import CommandSpec, TaskHandle
 from aura_rift.theme import stylesheet
+
+
+
+def make_lightbulb_icon(color: str) -> QIcon:
+    """Render a simple lightbulb SVG to a QIcon using the given icon color."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">'
+        '<circle cx="16" cy="13" r="9" fill="#f4b942" opacity="0.9"/>'
+        '<line x1="16" y1="1" x2="16" y2="3" stroke="#f4b942" stroke-width="1.5" stroke-linecap="round"/>'
+        '<line x1="5.5" y1="3" x2="7" y2="4.5" stroke="#f4b942" stroke-width="1.5" stroke-linecap="round"/>'
+        '<line x1="26.5" y1="3" x2="25" y2="4.5" stroke="#f4b942" stroke-width="1.5" stroke-linecap="round"/>'
+        f'<rect x="12" y="21" width="8" height="2.5" rx="1" fill="{color}"/>'
+        f'<rect x="13" y="24.5" width="6" height="2" rx="1" fill="{color}"/>'
+        f'<rect x="14" y="27.5" width="4" height="2" rx="0.5" fill="{color}"/>'
+        '</svg>'
+    )
+    from PySide6.QtSvg import QSvgRenderer
+
+    renderer = QSvgRenderer(QByteArray(svg.encode()))
+    pixmap = QPixmap(24, 24)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
 
 
 def hline() -> QFrame:
@@ -147,9 +174,9 @@ class ConsolePage(QWidget):
         header.setObjectName("pageHeader")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(24, 14, 24, 14)
-        self.status = label("未运行", 18, True)
+        self.status = label(self.window._tr("console.idle", "未运行"), 18, True)
         header_layout.addWidget(self.status, 1)
-        stop_button = QPushButton("终止进程")
+        stop_button = QPushButton(self.window._tr("button.stop", "终止进程"))
         stop_button.setObjectName("danger")
         stop_button.clicked.connect(window.stop_comfy)
         start_button = QPushButton("一键启动")
@@ -267,7 +294,7 @@ class LaunchPage(QWidget):
                 self.version_label.setText(f"ComfyUI：{exc}")
         else:
             self.version_label.setText("ComfyUI：未检测到 Git 仓库")
-        status = environment.dependency_status(comfy, self.window.config.python_path_override)
+        status = environment.dependency_status(comfy, self.window.config.python_path_override, self.window.config.venv_manager)
         self.env_label.setText("环境：" + "，".join(f"{k} {v}" for k, v in status.items()))
 
     def choose_comfy(self) -> None:
@@ -289,7 +316,7 @@ class LaunchPage(QWidget):
             return
         target.parent.mkdir(parents=True, exist_ok=True)
         self.window.run_commands(
-            install_comfy_commands(target, command_environment(self.window.config)),
+            install_comfy_commands(target, self.window.config),
             "安装 ComfyUI",
         )
 
@@ -313,21 +340,32 @@ class AdvancedPage(QWidget):
         header.setObjectName("pageHeader")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(24, 12, 24, 12)
-        header_layout.addWidget(label("高级选项", 16, True))
-        header_layout.addWidget(label("环境维护", 16, True))
+        self.advanced_header_title = label(self.window._tr("adv.title", "高级选项"), 16, True)
+        header_layout.addWidget(self.advanced_header_title)
         header_layout.addStretch(1)
-        cmd_button = QPushButton("显示启动命令")
+        cmd_button = QPushButton(self.window._tr("button.show_command", "显示启动命令"))
         cmd_button.clicked.connect(self.show_launch_command)
-        start_button = QPushButton("一键启动")
+        start_button = QPushButton(self.window._tr("button.start", "一键启动"))
         start_button.clicked.connect(window.start_comfy)
         header_layout.addWidget(cmd_button)
         header_layout.addWidget(start_button)
         layout.addWidget(header)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_launch_options(), "高级选项")
-        tabs.addTab(self._build_maintenance(), "环境维护")
+        tabs.addTab(self._build_launch_options(), self.window._tr("adv.title", "高级选项"))
+        tabs.addTab(self._build_maintenance(), self.window._tr("maint.title", "环境维护"))
+        self.advanced_tab_titles = [self.window._tr("adv.title", "高级选项"), self.window._tr("maint.title", "环境维护")]
+        self.adv_tabs = tabs
+        self._adv_tabs_index = 0
+        tabs.currentChanged.connect(self.on_advanced_tab_changed)
         layout.addWidget(tabs, 1)
+
+    def on_advanced_tab_changed(self, index: int) -> None:
+        self._adv_tabs_index = index
+        if 0 <= index < len(self.advanced_tab_titles):
+            self.advanced_header_title.setText(self.advanced_tab_titles[index])
+        if index == 1:
+            self.refresh()
 
     def _build_launch_options(self) -> QWidget:
         page = QWidget()
@@ -379,6 +417,32 @@ class AdvancedPage(QWidget):
         self.cpu_vae_check.setChecked(self.window.config.launch.cpu_vae)
         root.addWidget(self.option_row("VAE 运行位置", "显存紧张时可启用，但速度会下降", self.cpu_vae_check))
 
+        self.cache_combo = self.combo(
+            [("由 ComfyUI 决定", "auto"), ("LRU 缓存", "lru"), ("经典缓存", "classic"), ("不缓存", "none")],
+            self.window.config.launch.cache_strategy,
+        )
+        root.addWidget(self.option_row("缓存策略", "管理模型在显存中的缓存方式", self.cache_combo))
+
+        self.disable_smart_memory_check = QCheckBox("禁用智能内存管理")
+        self.disable_smart_memory_check.setChecked(self.window.config.launch.disable_smart_memory)
+        root.addWidget(self.option_row("智能内存管理", "关闭后 ComfyUI 会手动管理显存上下文，显存占用更保守", self.disable_smart_memory_check))
+
+        self.vae_precision_combo = self.combo(
+            [("自动", "auto"), ("BF16", "bf16"), ("FP16", "fp16"), ("FP32", "fp32")],
+            self.window.config.launch.vae_precision,
+        )
+        root.addWidget(self.option_row("VAE 精度", "VAE 解码精度，BF16/FP16 省显存但略有精度损失", self.vae_precision_combo))
+
+        self.text_enc_precision_combo = self.combo(
+            [("自动", "auto"), ("FP8 E4M3FN", "e4m3fn"), ("FP8 E5M2", "e5m2")],
+            self.window.config.launch.text_enc_precision,
+        )
+        root.addWidget(self.option_row("文本编码器精度", "FP8 可大幅降低显存，需硬件支持", self.text_enc_precision_combo))
+
+        self.cuda_malloc_check = QCheckBox("使用 CUDA Malloc")
+        self.cuda_malloc_check.setChecked(self.window.config.launch.cuda_malloc)
+        root.addWidget(self.option_row("CUDA 内分配", "启用后可能提升速度，部分环境可能不稳定", self.cuda_malloc_check))
+
         network_card = card()
         form = QGridLayout(network_card)
         form.setContentsMargins(18, 18, 18, 18)
@@ -392,14 +456,26 @@ class AdvancedPage(QWidget):
         self.disable_auto_launch.setChecked(self.window.config.launch.disable_auto_launch)
         self.extra_args = QLineEdit(self.window.config.launch.extra_args)
         self.extra_args.setPlaceholderText("额外 ComfyUI 参数，例如 --front-end-version Comfy-Org/ComfyUI_frontend@latest")
-        form.addWidget(label("网络与附加参数", 16, True), 0, 0, 1, 2)
+        self.enable_cors_edit = QLineEdit(self.window.config.launch.enable_cors)
+        self.enable_cors_edit.setPlaceholderText("留空则不启用 CORS，例如 *")
+        self.output_directory_edit = QLineEdit(self.window.config.launch.output_directory)
+        self.output_directory_edit.setPlaceholderText("留空使用默认 output 目录")
+        self.input_directory_edit = QLineEdit(self.window.config.launch.input_directory)
+        self.input_directory_edit.setPlaceholderText("留空使用默认 input 目录")
+        form.addWidget(label("网络、目录与附加参数", 16, True), 0, 0, 1, 2)
         form.addWidget(self.listen_check, 1, 0)
         form.addWidget(self.host_edit, 1, 1)
         form.addWidget(label("端口"), 2, 0)
         form.addWidget(self.port_spin, 2, 1)
         form.addWidget(self.disable_auto_launch, 3, 0, 1, 2)
-        form.addWidget(label("额外参数"), 4, 0)
-        form.addWidget(self.extra_args, 4, 1)
+        form.addWidget(label("CORS Header"), 4, 0)
+        form.addWidget(self.enable_cors_edit, 4, 1)
+        form.addWidget(label("输出目录"), 5, 0)
+        form.addWidget(self.output_directory_edit, 5, 1)
+        form.addWidget(label("输入目录"), 6, 0)
+        form.addWidget(self.input_directory_edit, 6, 1)
+        form.addWidget(label("额外参数"), 7, 0)
+        form.addWidget(self.extra_args, 7, 1)
         root.addWidget(network_card)
 
         buttons = QHBoxLayout()
@@ -425,6 +501,29 @@ class AdvancedPage(QWidget):
         warning_layout.addWidget(label("警告", 16, True))
         warning_layout.addWidget(label("环境维护会改动项目内 .venv 或 custom_nodes。执行前请确认当前任务已经停止。"))
         root.addWidget(warning)
+
+        # venv manager selector
+        self.venv_manager_combo = QComboBox()
+        for mgr in environment.VenvManager:
+            detected = environment.detect_venv_managers(self.window.comfy_dir()).get(mgr)
+            suffix = "（已安装）" if detected and detected.available else "（未检测到）"
+            if detected and detected.has_lock:
+                suffix = "（检测到锁文件）"
+            self.venv_manager_combo.addItem(environment.MANAGER_LABELS[mgr], mgr.value)
+        index = self.venv_manager_combo.findData(self.window.config.venv_manager)
+        if index >= 0:
+            self.venv_manager_combo.setCurrentIndex(index)
+        apply_mgr = QPushButton("应用并保存")
+        apply_mgr.clicked.connect(self.apply_venv_manager)
+        root.addWidget(self.option_row(
+            "虚拟环境管理器",
+            "选择创建环境和管理依赖的方式。检测到锁文件时建议跟随。",
+            self.venv_manager_combo,
+        ))
+        mgr_button_row = QHBoxLayout()
+        mgr_button_row.addStretch(1)
+        mgr_button_row.addWidget(apply_mgr)
+        root.addLayout(mgr_button_row)
 
         self.dep_table = QTableWidget(0, 2)
         self.dep_table.setHorizontalHeaderLabels(["项目", "状态"])
@@ -485,10 +584,18 @@ class AdvancedPage(QWidget):
         launch.precision = self.precision_combo.currentData()
         launch.preview_method = self.preview_combo.currentData()
         launch.cpu_vae = self.cpu_vae_check.isChecked()
+        launch.cache_strategy = self.cache_combo.currentData()
+        launch.disable_smart_memory = self.disable_smart_memory_check.isChecked()
+        launch.vae_precision = self.vae_precision_combo.currentData()
+        launch.text_enc_precision = self.text_enc_precision_combo.currentData()
+        launch.cuda_malloc = self.cuda_malloc_check.isChecked()
         launch.listen = self.listen_check.isChecked()
         launch.host = self.host_edit.text().strip() or "0.0.0.0"
         launch.port = self.port_spin.value()
         launch.disable_auto_launch = self.disable_auto_launch.isChecked()
+        launch.enable_cors = self.enable_cors_edit.text().strip()
+        launch.output_directory = self.output_directory_edit.text().strip()
+        launch.input_directory = self.input_directory_edit.text().strip()
         launch.extra_args = self.extra_args.text().strip()
         self.window.save_config()
         QMessageBox.information(self, "已保存", "高级选项已保存。")
@@ -501,15 +608,18 @@ class AdvancedPage(QWidget):
     def show_launch_command(self) -> None:
         self.apply_launch_options()
         comfy = self.window.comfy_dir()
-        python = environment.resolve_python(comfy, self.window.config.python_path_override)
+        python = environment.resolve_python(comfy, self.window.config.python_path_override, self.window.config.venv_manager)
         args = [str(comfy / "main.py"), *self.window.config.launch.to_args()]
         command = " ".join(shlex.quote(str(part)) for part in [python, *args])
         self.window.show_page("console")
         self.window.append_log(command + "\n")
 
     def refresh(self) -> None:
+        # Only run heavy env inspection when the maintenance tab is visible
+        if getattr(self, "_adv_tabs_index", 0) != 1:
+            return
         comfy = self.window.comfy_dir()
-        deps = environment.dependency_status(comfy, self.window.config.python_path_override)
+        deps = environment.dependency_status(comfy, self.window.config.python_path_override, self.window.config.venv_manager)
         self.dep_table.setRowCount(0)
         for key, value in deps.items():
             row = self.dep_table.rowCount()
@@ -517,7 +627,7 @@ class AdvancedPage(QWidget):
             self.dep_table.setItem(row, 0, QTableWidgetItem(key))
             self.dep_table.setItem(row, 1, QTableWidgetItem(value))
         torch = environment.inspect_torch(
-            environment.resolve_python(comfy, self.window.config.python_path_override)
+            environment.resolve_python(comfy, self.window.config.python_path_override, self.window.config.venv_manager)
         )
         self.torch_label.setText(
             f"PyTorch：{torch.torch}，CUDA：{torch.cuda}，设备：{torch.device}"
@@ -527,7 +637,7 @@ class AdvancedPage(QWidget):
 
     def create_venv(self) -> None:
         comfy = self.window.comfy_dir()
-        self.window.run_commands(create_venv_commands(comfy, command_environment(self.window.config)), "创建 .venv")
+        self.window.run_commands(create_venv_commands(comfy, self.window.config), "创建 .venv")
 
     def reinstall_package(self) -> None:
         package = self.package_edit.text().strip()
@@ -535,9 +645,15 @@ class AdvancedPage(QWidget):
             QMessageBox.warning(self, "缺少包名", "请输入需要重装的 Python 包名。")
             return
         self.window.run_commands(
-            [reinstall_package_command(self.window.comfy_dir(), package, command_environment(self.window.config))],
+            [reinstall_package_command(self.window.comfy_dir(), package, self.window.config)],
             f"重装 {package}",
         )
+
+    def apply_venv_manager(self) -> None:
+        self.window.config.venv_manager = self.venv_manager_combo.currentData()
+        self.window.save_config()
+        self.refresh()
+        QMessageBox.information(self, "已保存", "虚拟环境管理器已更新。")
 
 
 class VersionPage(QWidget):
@@ -551,23 +667,36 @@ class VersionPage(QWidget):
         header.setObjectName("pageHeader")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(24, 12, 24, 12)
-        header_layout.addWidget(label("内核", 16, True))
-        header_layout.addWidget(label("扩展", 16, True))
-        header_layout.addWidget(label("安装新扩展", 16, True))
+        self.version_header_title = label(self.window._tr("ver.core", "内核"), 16, True)
+        header_layout.addWidget(self.version_header_title)
         header_layout.addStretch(1)
-        refresh = QPushButton("刷新列表")
-        refresh.clicked.connect(self.refresh)
-        update = QPushButton("一键更新")
+        refresh = QPushButton(self.window._tr("ver.refresh_list", "刷新列表"))
+        refresh.clicked.connect(self.reload_extension_list)
+        update = QPushButton(self.window._tr("ver.update_all", "一键更新"))
         update.clicked.connect(self.update_core)
         header_layout.addWidget(refresh)
         header_layout.addWidget(update)
         layout.addWidget(header)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_core_tab(), "内核")
-        tabs.addTab(self._build_extensions_tab(), "扩展")
-        tabs.addTab(self._build_install_tab(), "安装新扩展")
+        tabs.addTab(self._build_core_tab(), self.window._tr("ver.core", "内核"))
+        tabs.addTab(self._build_extensions_tab(), self.window._tr("ver.extensions", "扩展"))
+        tabs.addTab(self._build_install_tab(), self.window._tr("ver.install", "安装新扩展"))
+        self.version_tab_titles = [self.window._tr("ver.core", "内核"), self.window._tr("ver.extensions", "扩展"), self.window._tr("ver.install", "安装新扩展")]
+        self.tabs = tabs
+        tabs.currentChanged.connect(self.on_version_tab_changed)
         layout.addWidget(tabs, 1)
+
+    def on_version_tab_changed(self, index: int) -> None:
+        self._version_tabs_index = index
+        if 0 <= index < len(self.version_tab_titles):
+            self.version_header_title.setText(self.version_tab_titles[index])
+        # Lazy: only refresh the tab if it hasn't been loaded yet
+        loaded = getattr(self, "_loaded_tabs", set())
+        if index not in loaded:
+            self.refresh_current_tab()
+            loaded.add(index)
+            self._loaded_tabs = loaded
 
     def _build_core_tab(self) -> QWidget:
         page = QWidget()
@@ -580,7 +709,30 @@ class VersionPage(QWidget):
         root.addWidget(self.branch_label)
         root.addWidget(self.commit_label)
 
-        branch_row = QHBoxLayout()
+        # channel selector: stable (tags) / dev (all commits)
+        channel_card = card()
+        channel_layout = QHBoxLayout(channel_card)
+        channel_layout.setContentsMargins(18, 12, 18, 12)
+        channel_layout.addWidget(label("版本通道", 14, True))
+        self.channel_group = QButtonGroup(page)
+        self.channel_stable = QPushButton("稳定版")
+        self.channel_stable.setCheckable(True)
+        self.channel_dev = QPushButton("开发版")
+        self.channel_dev.setCheckable(True)
+        self.channel_group.addButton(self.channel_stable)
+        self.channel_group.addButton(self.channel_dev)
+        self.channel_stable.clicked.connect(self.on_channel_change)
+        self.channel_dev.clicked.connect(self.on_channel_change)
+        self.channel_stable.setChecked(True)
+        channel_layout.addWidget(self.channel_stable)
+        channel_layout.addWidget(self.channel_dev)
+        channel_layout.addStretch(1)
+        root.addWidget(channel_card)
+
+        # branch row—visible only in expert mode
+        self.branch_row_widget = QWidget()
+        branch_row = QHBoxLayout(self.branch_row_widget)
+        branch_row.setContentsMargins(0, 0, 0, 0)
         self.branch_combo = QComboBox()
         switch_branch = QPushButton("切换分支")
         switch_branch.clicked.connect(self.checkout_branch)
@@ -590,7 +742,7 @@ class VersionPage(QWidget):
         branch_row.addWidget(self.branch_combo, 1)
         branch_row.addWidget(switch_branch)
         branch_row.addWidget(fetch)
-        root.addLayout(branch_row)
+        root.addWidget(self.branch_row_widget)
 
         self.commit_table = QTableWidget(0, 5)
         self.commit_table.setHorizontalHeaderLabels(["版本 ID", "提交信息", "日期", "当前", "操作"])
@@ -601,13 +753,29 @@ class VersionPage(QWidget):
         root.addWidget(self.commit_table, 1)
         return page
 
+    def is_stable_channel(self) -> bool:
+        return self.channel_stable.isChecked()
+
     def _build_extensions_tab(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
         root.setContentsMargins(24, 24, 24, 24)
-        self.extension_table = QTableWidget(0, 5)
-        self.extension_table.setHorizontalHeaderLabels(["扩展名", "分支", "版本", "状态", "路径"])
-        self.extension_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.extension_table = QTableWidget(0, 6)
+        self.extension_table.setHorizontalHeaderLabels(["扩展名", "分支", "版本", "状态", "路径", "操作"])
+        header = self.extension_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.Interactive)
+        header.setStretchLastSection(True)
+        self.extension_table.setColumnWidth(0, 220)
+        self.extension_table.setColumnWidth(1, 140)
+        self.extension_table.setColumnWidth(2, 100)
+        self.extension_table.setColumnWidth(3, 90)
+        self.extension_table.setColumnWidth(4, 300)
+        self.extension_table.setColumnWidth(5, 80)
         self.extension_table.verticalHeader().setVisible(False)
         self.extension_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.extension_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -627,8 +795,11 @@ class VersionPage(QWidget):
         page = QWidget()
         root = QVBoxLayout(page)
         root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(12)
+
         manager_card = card()
         manager_layout = QHBoxLayout(manager_card)
+        manager_layout.setContentsMargins(18, 12, 18, 12)
         self.manager_label = label("ComfyUI-Manager：未检测")
         manager_button = QPushButton("安装或更新 ComfyUI-Manager")
         manager_button.clicked.connect(self.window.install_or_update_manager)
@@ -636,35 +807,144 @@ class VersionPage(QWidget):
         manager_layout.addWidget(manager_button)
         root.addWidget(manager_card)
 
+        # Extension browser
+        self.all_extensions: list[ExtensionEntry] = []
+        search_row = QHBoxLayout()
+        self.extension_search = QLineEdit()
+        self.extension_search.setPlaceholderText("搜索扩展名称、作者、类别...")
+        self._search_timer = None
+        self.extension_search.textChanged.connect(self._on_search_text_changed)
+        search_button = QPushButton("搜索")
+        search_button.clicked.connect(self.filter_extensions)
+        refresh_list = QPushButton("刷新列表")
+        refresh_list.clicked.connect(self.reload_extension_list)
+        search_row.addWidget(label("搜索扩展", 14, True))
+        search_row.addWidget(self.extension_search, 1)
+        search_row.addWidget(search_button)
+        search_row.addWidget(refresh_list)
+        root.addLayout(search_row)
+
+        self.extension_count_label = label("加载中...")
+        root.addWidget(self.extension_count_label)
+
+        # Extension list in a scroll area
+        self.extension_install_list = QTableWidget(0, 5)
+        self.extension_install_list.setHorizontalHeaderLabels(["插件名称", "作者", "类别", "状态", "操作"])
+        header = self.extension_install_list.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.Interactive)
+        header.setStretchLastSection(True)
+        self.extension_install_list.setColumnWidth(0, 300)
+        self.extension_install_list.setColumnWidth(1, 160)
+        self.extension_install_list.setColumnWidth(2, 120)
+        self.extension_install_list.setColumnWidth(3, 80)
+        self.extension_install_list.setColumnWidth(4, 90)
+        self.extension_install_list.verticalHeader().setVisible(False)
+        self.extension_install_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.extension_install_list.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.extension_install_list.setMinimumHeight(300)
+        root.addWidget(self.extension_install_list, 1)
+
+        # Manual URL install (kept at bottom)
         url_card = card()
         url_layout = QHBoxLayout(url_card)
+        url_layout.setContentsMargins(18, 12, 18, 12)
         self.plugin_url = QLineEdit()
         self.plugin_url.setPlaceholderText("扩展 Git URL，例如 https://github.com/user/node-pack.git")
         install = QPushButton("安装")
         install.clicked.connect(self.install_plugin)
-        url_layout.addWidget(label("扩展 URL"))
+        url_layout.addWidget(label("手动安装 URL", 14, True))
         url_layout.addWidget(self.plugin_url, 1)
         url_layout.addWidget(install)
         root.addWidget(url_card)
-
-        help_text = QTextBrowser()
-        help_text.setMarkdown(
-            "### 插件管理策略\n\n"
-            "- 首选安装 ComfyUI-Manager，让它负责完整插件生态。\n"
-            "- 这里额外保留 Git URL 安装，用于安装未进入 Manager 列表的自定义节点。\n"
-            "- 所有扩展默认安装到 `custom_nodes`。"
-        )
-        root.addWidget(help_text, 1)
         return page
 
+    def _on_search_text_changed(self) -> None:
+        """Debounce search to avoid rebuilding the table on every keystroke."""
+        if self._search_timer is not None:
+            self._search_timer.stop()
+        from PySide6.QtCore import QTimer
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self.filter_extensions)
+        self._search_timer.start(300)
+
+    def filter_extensions(self) -> None:
+        query = self.extension_search.text()
+        filtered = search_entries(self.all_extensions, query)
+        self._populate_extension_list(filtered)
+
+    def _populate_extension_list(self, entries: list[ExtensionEntry]) -> None:
+        self.extension_install_list.setUpdatesEnabled(False)
+        self.extension_install_list.setRowCount(0)
+        cap = 200
+        shown = entries[:cap]
+        self.extension_install_list.setRowCount(len(shown))
+        for row, entry in enumerate(shown):
+            self.extension_install_list.setItem(row, 0, QTableWidgetItem(entry.title))
+            self.extension_install_list.setItem(row, 1, QTableWidgetItem(entry.author))
+            self.extension_install_list.setItem(row, 2, QTableWidgetItem(entry.category))
+            self.extension_install_list.setItem(row, 3, QTableWidgetItem("已安装" if entry.installed else "未安装"))
+            self.extension_install_list.setItem(row, 4, QTableWidgetItem(entry.repository_url))
+            button_text = "已安装" if entry.installed else "安装"
+            button = QPushButton(button_text)
+            button.setEnabled(not entry.installed)
+            if not entry.installed:
+                button.clicked.connect(lambda _=False, url=entry.repository_url: self._install_from_url(url))
+            self.extension_install_list.setCellWidget(row, 4, button)
+        self.extension_install_list.setUpdatesEnabled(True)
+        total = len(entries)
+        self.extension_count_label.setText(f"共 {total} 个扩展，显示前 {cap} 个" if total > cap else f"共 {total} 个扩展")
+
+    def _install_from_url(self, url: str) -> None:
+        self.plugin_url.setText(url)
+        self.install_plugin()
+
     def refresh(self) -> None:
+        if not hasattr(self, "_version_tabs_index"):
+            self._version_tabs_index = 0
+        self.refresh_current_tab()
+
+    def refresh_current_tab(self) -> None:
+        """Only refresh the currently visible sub-tab, not all three."""
+        idx = getattr(self, "_version_tabs_index", 0)
+        if idx == 0:
+            self.refresh_core()
+        elif idx == 1:
+            self.refresh_extensions()
+        elif idx == 2:
+            self.refresh_install_tab()
+
+    def refresh_install_tab(self) -> None:
+        comfy = self.window.comfy_dir()
+        custom_nodes = comfy / "custom_nodes"
+        manager = custom_nodes / "ComfyUI-Manager"
+        self.manager_label.setText("ComfyUI-Manager：已安装" if manager.exists() else "ComfyUI-Manager：未安装")
+        # Reload from disk only if we haven't loaded yet
+        if not self.all_extensions:
+            self.all_extensions = get_extensions(comfy)
+        self.all_extensions = mark_installed(self.all_extensions, custom_nodes)
+        self.filter_extensions()
+
+    def reload_extension_list(self) -> None:
+        """Force reload the extension list from disk."""
+        self.all_extensions = []
+        self._loaded_tabs = set()
+        self.refresh_current_tab()
+
+    def on_channel_change(self) -> None:
         self.refresh_core()
-        self.refresh_extensions()
 
     def refresh_core(self) -> None:
         comfy = self.window.comfy_dir()
         self.commit_table.setRowCount(0)
-        self.branch_combo.clear()
+        # expert mode controls branch row visibility
+        self.branch_row_widget.setVisible(self.window.config.expert_mode)
+        if not self.branch_combo.isEnabled():
+            self.branch_combo.setEnabled(True)
         if not (comfy / ".git").exists():
             self.remote_label.setText("远程地址：未检测到 ComfyUI Git 仓库")
             self.branch_label.setText("当前分支：-")
@@ -676,14 +956,19 @@ class VersionPage(QWidget):
             self.branch_label.setText(f"当前分支：{git.current_branch()}")
             current = git.current_commit()
             self.commit_label.setText(f"当前版本：{current}")
-            for branch in git.branches():
-                self.branch_combo.addItem(branch)
-            index = self.branch_combo.findText(git.current_branch())
-            if index >= 0:
-                self.branch_combo.setCurrentIndex(index)
-            for item in git.commits():
-                row = self.commit_table.rowCount()
-                self.commit_table.insertRow(row)
+            if self.window.config.expert_mode:
+                for branch in git.branches():
+                    self.branch_combo.addItem(branch)
+                index = self.branch_combo.findText(git.current_branch())
+                if index >= 0:
+                    self.branch_combo.setCurrentIndex(index)
+            else:
+                self.branch_combo.clear()
+            # stable channel→tags; dev channel→all commits
+            items = git.tags() if self.is_stable_channel() else git.commits()
+            self.commit_table.setUpdatesEnabled(False)
+            self.commit_table.setRowCount(len(items))
+            for row, item in enumerate(items):
                 self.commit_table.setItem(row, 0, QTableWidgetItem(item.short_hash))
                 self.commit_table.setItem(row, 1, QTableWidgetItem(item.subject))
                 self.commit_table.setItem(row, 2, QTableWidgetItem(item.date))
@@ -692,19 +977,21 @@ class VersionPage(QWidget):
                 button.setEnabled(not item.current)
                 button.clicked.connect(lambda _=False, rev=item.full_hash: self.checkout_revision(rev))
                 self.commit_table.setCellWidget(row, 4, button)
+            self.commit_table.setUpdatesEnabled(True)
         except GitError as exc:
             self.remote_label.setText(f"远程地址：读取失败：{exc}")
 
     def refresh_extensions(self) -> None:
         custom_nodes = self.window.comfy_dir() / "custom_nodes"
-        self.extension_table.setRowCount(0)
         manager = custom_nodes / "ComfyUI-Manager"
         self.manager_label.setText("ComfyUI-Manager：已安装" if manager.exists() else "ComfyUI-Manager：未安装")
         if not custom_nodes.exists():
+            self.extension_table.setRowCount(0)
             return
-        for child in sorted((p for p in custom_nodes.iterdir() if p.is_dir()), key=lambda p: p.name.lower()):
-            row = self.extension_table.rowCount()
-            self.extension_table.insertRow(row)
+        dirs = sorted((p for p in custom_nodes.iterdir() if p.is_dir()), key=lambda p: p.name.lower())
+        self.extension_table.setUpdatesEnabled(False)
+        self.extension_table.setRowCount(len(dirs))
+        for row, child in enumerate(dirs):
             self.extension_table.setItem(row, 0, QTableWidgetItem(child.name))
             self.extension_table.setItem(row, 4, QTableWidgetItem(str(child)))
             if (child / ".git").exists():
@@ -720,10 +1007,15 @@ class VersionPage(QWidget):
                 self.extension_table.setItem(row, 1, QTableWidgetItem("-"))
                 self.extension_table.setItem(row, 2, QTableWidgetItem("-"))
                 self.extension_table.setItem(row, 3, QTableWidgetItem("非 Git 扩展"))
+            uninstall_btn = QPushButton("卸载")
+            uninstall_btn.setObjectName("danger")
+            uninstall_btn.clicked.connect(lambda _=False, p=child: self._uninstall_extension(p))
+            self.extension_table.setCellWidget(row, 5, uninstall_btn)
+        self.extension_table.setUpdatesEnabled(True)
 
     def fetch_core(self) -> None:
         self.window.run_commands(
-            [CommandSpec(["git", "fetch", "--all", "--tags", "--prune"], cwd=self.window.comfy_dir())],
+            [CommandSpec(["git", "fetch", "--all", "--tags", "--prune"], cwd=self.window.comfy_dir(), env=self.window.config.network.environment())],
             "拉取远端信息",
         )
 
@@ -737,7 +1029,7 @@ class VersionPage(QWidget):
             self.window.append_log(f"更新 ComfyUI 已阻止：{exc}\n")
             return
         self.window.run_commands(
-            [CommandSpec(["git", "pull", "--ff-only"], cwd=self.window.comfy_dir())],
+            [CommandSpec(["git", "pull", "--ff-only"], cwd=self.window.comfy_dir(), env=self.window.config.network.environment())],
             "更新 ComfyUI",
         )
 
@@ -770,6 +1062,23 @@ class VersionPage(QWidget):
         if path and not open_path(path):
             InternalFileBrowser(path, self).exec()
 
+    def _uninstall_extension(self, path: Path) -> None:
+        name = path.name
+        reply = QMessageBox.question(
+            self, "卸载确认",
+            f"确认删除扩展 {name}？\n这会从磁盘移除整个目录，操作不可恢复。",
+        )
+        if reply != QMessageBox.Yes:
+            return
+        import shutil
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            QMessageBox.warning(self, "卸载失败", f"删除目录失败：{exc}")
+            return
+        self.window.append_log(f"已卸载扩展：{name}\n")
+        self.refresh_extensions()
+
     def install_plugin(self) -> None:
         url = self.plugin_url.text().strip()
         if not url:
@@ -777,7 +1086,7 @@ class VersionPage(QWidget):
             return
         ensure_dir(self.window.comfy_dir() / "custom_nodes")
         self.window.run_commands(
-            [install_plugin_command(self.window.comfy_dir(), url, command_environment(self.window.config))],
+            [install_plugin_command(self.window.comfy_dir(), url, self.window.config)],
             "安装扩展",
         )
 
@@ -837,7 +1146,7 @@ class ToolsPage(QWidget):
     def refresh_hardware(self) -> None:
         comfy = self.window.comfy_dir()
         torch = environment.inspect_torch(
-            environment.resolve_python(comfy, self.window.config.python_path_override)
+            environment.resolve_python(comfy, self.window.config.python_path_override, self.window.config.venv_manager)
         )
         gpu_lines = "\n".join(f"- {item}" for item in environment.detect_gpu())
         self.hardware.setMarkdown(
@@ -854,14 +1163,61 @@ class SettingsPage(QWidget):
     def __init__(self, window: "MainWindow") -> None:
         super().__init__()
         self.window = window
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        tabs = QTabWidget()
-        tabs.addTab(self._build_general(), "一般设置")
-        tabs.addTab(self._build_about(), "关于")
-        root.addWidget(tabs, 1)
+        self.nav_buttons: dict[str, QPushButton] = {}
+        self.pages: dict[str, QWidget] = {}
 
-    def _build_general(self) -> QWidget:
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.stack = QStackedWidget()
+        layout.addWidget(self._build_sub_nav())
+        layout.addWidget(self.stack, 1)
+
+        self.about_browser = QTextBrowser()
+        self._build_general()
+        self._build_env()
+        self._build_proxy()
+        self._build_about()
+
+    def _build_sub_nav(self) -> QWidget:
+        side = QFrame()
+        side.setObjectName("settingsNav")
+        side.setFixedWidth(130)
+        nav = QVBoxLayout(side)
+        nav.setContentsMargins(8, 18, 8, 18)
+        nav.setSpacing(8)
+        group = QButtonGroup(side)
+        group.setExclusive(True)
+        items = [
+            ("general", self.window._tr("settings.general", "一般设置")),
+            ("environment", self.window._tr("settings.environment", "环境设置")),
+            ("proxy", self.window._tr("settings.proxy", "代理设置")),
+            ("about", self.window._tr("settings.about", "关于")),
+        ]
+        for name, text in items:
+            button = QPushButton(text)
+            button.setObjectName("navButton")
+            button.setCheckable(True)
+            button.setMinimumHeight(46)
+            button.clicked.connect(lambda _=False, n=name: self.show_sub_page(n))
+            self.nav_buttons[name] = button
+            group.addButton(button)
+            nav.addWidget(button)
+        nav.addStretch(1)
+        return side
+
+    def show_sub_page(self, name: str) -> None:
+        page = self.pages.get(name)
+        if not page:
+            return
+        self.stack.setCurrentWidget(page)
+        if name in self.nav_buttons:
+            self.nav_buttons[name].setChecked(True)
+        if name == "about":
+            self.about_browser.setMarkdown(bundled_markdown("about.md"))
+
+    def _build_general(self) -> None:
         page = QWidget()
         root = QVBoxLayout(page)
         root.setContentsMargins(28, 28, 28, 28)
@@ -877,6 +1233,20 @@ class SettingsPage(QWidget):
         self.language_combo.addItem("中文（简体）", "zh_CN")
         root.addWidget(self.option_row("界面语言", "首版仅提供中文，已预留后续多语言结构", self.language_combo))
 
+        save = QPushButton("保存设置")
+        save.clicked.connect(self.save_general)
+        root.addLayout(self._save_row(save))
+        root.addStretch(1)
+        self.stack.addWidget(page)
+        self.pages["general"] = page
+        self.show_sub_page("general")
+
+    def _build_env(self) -> None:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(28, 28, 28, 28)
+        root.setSpacing(14)
+
         self.project_path = QLineEdit(self.window.config.comfy_path)
         choose_project = QPushButton("选择")
         choose_project.clicked.connect(self.choose_project)
@@ -888,38 +1258,64 @@ class SettingsPage(QWidget):
         choose_python.clicked.connect(self.choose_python)
         root.addWidget(self.path_row("Python 路径覆盖", "用于兼容已有 Python/venv，Git 路径覆盖已在 Linux 版删除", self.python_override, choose_python))
 
+        self.venv_manager_combo = QComboBox()
+        for mgr in environment.VenvManager:
+            self.venv_manager_combo.addItem(environment.MANAGER_LABELS[mgr], mgr.value)
+        index = self.venv_manager_combo.findData(self.window.config.venv_manager)
+        if index >= 0:
+            self.venv_manager_combo.setCurrentIndex(index)
+        root.addWidget(self.option_row("虚拟环境管理器", "选择创建环境和管理依赖的方式", self.venv_manager_combo))
+
+        save = QPushButton("保存环境设置")
+        save.clicked.connect(self.save_env)
+        root.addLayout(self._save_row(save))
+        root.addStretch(1)
+        self.stack.addWidget(page)
+        self.pages["environment"] = page
+
+    def _build_proxy(self) -> None:
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(28, 28, 28, 28)
+        root.setSpacing(14)
+
         self.http_proxy = QLineEdit(self.window.config.network.http_proxy)
         self.https_proxy = QLineEdit(self.window.config.network.https_proxy)
         self.pypi_mirror = QCheckBox("使用 PyPI 国内镜像")
         self.pypi_mirror.setChecked(self.window.config.network.pypi_mirror)
+        self.github_proxy_edit = QLineEdit(self.window.config.network.github_proxy)
+        self.github_proxy_edit.setPlaceholderText("GitHub 镜像前缀，例如 https://gh-proxy.com/")
         proxy_card = card()
         proxy_layout = QGridLayout(proxy_card)
         proxy_layout.setContentsMargins(18, 18, 18, 18)
-        proxy_layout.addWidget(label("代理设置", 16, True), 0, 0, 1, 2)
+        proxy_layout.addWidget(label("代理与镜像设置", 16, True), 0, 0, 1, 2)
         proxy_layout.addWidget(label("HTTP_PROXY"), 1, 0)
         proxy_layout.addWidget(self.http_proxy, 1, 1)
         proxy_layout.addWidget(label("HTTPS_PROXY"), 2, 0)
         proxy_layout.addWidget(self.https_proxy, 2, 1)
         proxy_layout.addWidget(self.pypi_mirror, 3, 0, 1, 2)
+        proxy_layout.addWidget(label("GitHub 镜像前缀"), 4, 0)
+        proxy_layout.addWidget(self.github_proxy_edit, 4, 1)
         root.addWidget(proxy_card)
 
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        save = QPushButton("保存设置")
-        save.clicked.connect(self.save)
-        buttons.addWidget(save)
-        root.addLayout(buttons)
+        save = QPushButton("保存代理设置")
+        save.clicked.connect(self.save_proxy)
+        root.addLayout(self._save_row(save))
         root.addStretch(1)
-        return page
+        self.stack.addWidget(page)
+        self.pages["proxy"] = page
 
-    def _build_about(self) -> QWidget:
+    def _build_about(self) -> None:
         page = QWidget()
         root = QVBoxLayout(page)
         root.setContentsMargins(28, 28, 28, 28)
-        browser = QTextBrowser()
-        browser.setMarkdown(bundled_markdown("about.md"))
-        root.addWidget(browser, 1)
-        return page
+        self.about_browser.setMarkdown(bundled_markdown("about.md"))
+        root.addWidget(self.about_browser, 1)
+        self.stack.addWidget(page)
+        self.pages["about"] = page
+
+    def refresh(self) -> None:
+        self.about_browser.setMarkdown(bundled_markdown("about.md"))
 
     def option_row(self, title: str, desc: str, control: QWidget) -> QWidget:
         row = card()
@@ -944,6 +1340,12 @@ class SettingsPage(QWidget):
         layout.addWidget(button)
         return row
 
+    def _save_row(self, button: QPushButton) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(button)
+        return row
+
     def choose_project(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "选择 ComfyUI 目录", self.project_path.text())
         if path:
@@ -954,17 +1356,28 @@ class SettingsPage(QWidget):
         if path:
             self.python_override.setText(path)
 
-    def save(self) -> None:
-        self.window.config.comfy_path = self.project_path.text().strip() or str(default_comfy_dir())
-        self.window.config.python_path_override = self.python_override.text().strip()
+    def save_general(self) -> None:
         self.window.config.language = self.language_combo.currentData()
         self.window.config.expert_mode = bool(self.mode_combo.currentData())
+        self.window.save_config()
+        self.window.refresh_pages()
+        QMessageBox.information(self, "已保存", "一般设置已保存。")
+
+    def save_env(self) -> None:
+        self.window.config.comfy_path = self.project_path.text().strip() or str(default_comfy_dir())
+        self.window.config.python_path_override = self.python_override.text().strip()
+        self.window.config.venv_manager = self.venv_manager_combo.currentData()
+        self.window.save_config()
+        self.window.refresh_pages()
+        QMessageBox.information(self, "已保存", "环境设置已保存。")
+
+    def save_proxy(self) -> None:
         self.window.config.network.http_proxy = self.http_proxy.text().strip()
         self.window.config.network.https_proxy = self.https_proxy.text().strip()
         self.window.config.network.pypi_mirror = self.pypi_mirror.isChecked()
+        self.window.config.network.github_proxy = self.github_proxy_edit.text().strip()
         self.window.save_config()
-        self.window.refresh_pages()
-        QMessageBox.information(self, "已保存", "设置已保存。")
+        QMessageBox.information(self, "已保存", "代理设置已保存。")
 
 
 class MainWindow(QMainWindow):
@@ -988,6 +1401,9 @@ class MainWindow(QMainWindow):
     def comfy_dir(self) -> Path:
         return Path(self.config.comfy_path).expanduser()
 
+    def _tr(self, key: str, default: str | None = None) -> str:
+        return self.translator.tr(key, default)
+
     def rebuild(self) -> None:
         self.nav_buttons = {}
         QApplication.instance().setStyleSheet(stylesheet(self.config.theme))
@@ -1002,8 +1418,11 @@ class MainWindow(QMainWindow):
         title_layout.setContentsMargins(18, 8, 18, 8)
         title_layout.addWidget(label(f"{APP_NAME} {__version__}", 17, True))
         title_layout.addStretch(1)
-        theme_button = QPushButton("灯泡")
+        icon_color = "#f0f0f0" if self.config.theme == "dark" else "#222222"
+        theme_button = QPushButton(make_lightbulb_icon(icon_color), "")
         theme_button.setObjectName("flat")
+        theme_button.setToolTip("切换深色/浅色主题")
+        theme_button.setIconSize(QPixmap(24, 24).size())
         theme_button.clicked.connect(self.toggle_theme)
         title_layout.addWidget(theme_button)
         root.addWidget(title)
@@ -1046,12 +1465,12 @@ class MainWindow(QMainWindow):
         group = QButtonGroup(side)
         group.setExclusive(True)
         items = [
-            ("launch", "一键启动"),
-            ("advanced", "高级选项"),
-            ("versions", "版本管理"),
-            ("tools", "小工具"),
-            ("console", "控制台"),
-            ("settings", "设置"),
+            ("launch", self._tr("nav.launch", "一键启动")),
+            ("advanced", self._tr("nav.advanced", "高级选项")),
+            ("versions", self._tr("nav.versions", "版本管理")),
+            ("tools", self._tr("nav.tools", "小工具")),
+            ("console", self._tr("nav.console", "控制台")),
+            ("settings", self._tr("nav.settings", "设置")),
         ]
         for name, text in items:
             button = QPushButton(text)
@@ -1086,7 +1505,9 @@ class MainWindow(QMainWindow):
         self.config_store.save(self.config)
 
     def refresh_pages(self) -> None:
-        for page in self.pages.values():
+        """Refresh only the currently visible page to avoid heavy I/O on hidden pages."""
+        page = self.stack.currentWidget() if hasattr(self, "stack") else None
+        if page:
             refresh = getattr(page, "refresh", None)
             if callable(refresh):
                 refresh()
@@ -1146,7 +1567,7 @@ class MainWindow(QMainWindow):
         if manager.exists():
             commands = [CommandSpec(["git", "pull", "--ff-only"], cwd=manager)]
         else:
-            commands = install_manager_commands(comfy, command_environment(self.config))
+            commands = install_manager_commands(comfy, self.config)
         self.run_commands(commands, "安装或更新 ComfyUI-Manager")
 
     def closeEvent(self, event) -> None:  # noqa: N802
