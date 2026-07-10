@@ -37,7 +37,7 @@ class ComfyProcess(QObject):
             self.state_changed.emit("路径错误")
             return
         python = str(resolve_python(comfy_path, config.python_path_override, config.venv_manager))
-        args = [str(main_py), *config.launch.to_args()]
+        args = [str(main_py), *config.launch.to_args(), *config.full.to_args()]
         env = QProcessEnvironment.systemEnvironment()
         for key, value in config.network.environment().items():
             env.insert(key, value)

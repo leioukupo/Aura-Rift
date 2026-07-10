@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, Qt, QUrl
+from PySide6.QtCore import QByteArray, QSize, Qt, Signal, QUrl
 from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QTextBrowser,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -62,6 +64,7 @@ from aura_rift.services.git_service import DirtyRepositoryError, GitError, GitSe
 from aura_rift.services.registry import ExtensionEntry, get_extensions, mark_installed, search_entries
 from aura_rift.services.tasks import CommandSpec, TaskHandle
 from aura_rift.theme import stylesheet
+from aura_rift.ui.icons import make_nav_icon
 
 
 
@@ -174,12 +177,18 @@ class ConsolePage(QWidget):
         header.setObjectName("pageHeader")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(24, 14, 24, 14)
-        self.status = label(self.window._tr("console.idle", "未运行"), 18, True)
-        header_layout.addWidget(self.status, 1)
+        title_lbl = label(self.window._tr("nav.console", "控制台"), 18, True)
+        header_layout.addWidget(title_lbl)
+        self.status = QLabel(self.window._tr("console.idle", "未运行"))
+        self.status.setObjectName("statusBadge")
+        self.status.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(self.status)
+        header_layout.addStretch(1)
         stop_button = QPushButton(self.window._tr("button.stop", "终止进程"))
         stop_button.setObjectName("danger")
         stop_button.clicked.connect(window.stop_comfy)
         start_button = QPushButton("一键启动")
+        start_button.setObjectName("primary")
         start_button.clicked.connect(window.start_comfy)
         header_layout.addWidget(stop_button)
         header_layout.addWidget(start_button)
@@ -196,7 +205,12 @@ class ConsolePage(QWidget):
         self.output.moveCursor(QTextCursor.End)
 
     def set_status(self, status: str) -> None:
+        running = ("运行" in status) and ("未" not in status)
+        error = ("错" in status) or ("失败" in status)
+        self.status.setObjectName("statusRunning" if running else ("statusError" if error else "statusBadge"))
         self.status.setText(status)
+        self.status.style().unpolish(self.status)
+        self.status.style().polish(self.status)
 
 
 class LaunchPage(QWidget):
@@ -209,13 +223,13 @@ class LaunchPage(QWidget):
 
         hero = QFrame()
         hero.setObjectName("hero")
-        hero.setMinimumHeight(180)
+        hero.setMinimumHeight(190)
         hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(42, 28, 42, 28)
+        hero_layout.setContentsMargins(46, 30, 46, 30)
         hero_layout.addStretch(1)
-        hero_layout.addWidget(label("ComfyUI", 18))
-        hero_layout.addWidget(label("Aura-Rift 启动器", 28, True))
-        hero_layout.addWidget(label("让 Linux 下的 ComfyUI 启动、升级和插件管理更顺手。", 16))
+        hero_layout.addWidget(label("ComfyUI · Linux", 13))
+        hero_layout.addWidget(label("Aura-Rift 启动器", 30, True))
+        hero_layout.addWidget(label("让 Linux 下的 ComfyUI 启动、升级和插件管理更顺手。", 15))
         hero_layout.addStretch(1)
         root.addWidget(hero)
 
@@ -354,7 +368,12 @@ class AdvancedPage(QWidget):
         tabs = QTabWidget()
         tabs.addTab(self._build_launch_options(), self.window._tr("adv.title", "高级选项"))
         tabs.addTab(self._build_maintenance(), self.window._tr("maint.title", "环境维护"))
-        self.advanced_tab_titles = [self.window._tr("adv.title", "高级选项"), self.window._tr("maint.title", "环境维护")]
+        tabs.addTab(self._build_full_params(), self.window._tr("adv.full", "完整参数"))
+        self.advanced_tab_titles = [
+            self.window._tr("adv.title", "高级选项"),
+            self.window._tr("maint.title", "环境维护"),
+            self.window._tr("adv.full", "完整参数"),
+        ]
         self.adv_tabs = tabs
         self._adv_tabs_index = 0
         tabs.currentChanged.connect(self.on_advanced_tab_changed)
@@ -365,7 +384,9 @@ class AdvancedPage(QWidget):
         if 0 <= index < len(self.advanced_tab_titles):
             self.advanced_header_title.setText(self.advanced_tab_titles[index])
         if index == 1:
-            self.refresh()
+            self.refresh()  # environment maintenance tab
+        elif index == 2 and hasattr(self, "full_scroll"):
+            self.refresh_full_params()
 
     def _build_launch_options(self) -> QWidget:
         page = QWidget()
@@ -490,6 +511,323 @@ class AdvancedPage(QWidget):
         root.addStretch(1)
         return page
 
+    def _build_full_params(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("fullParams")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("fullScroll")
+        inner = QWidget()
+        scroll.setWidget(inner)
+        root = QVBoxLayout(inner)
+        root.setContentsMargins(24, 18, 24, 18)
+        root.setSpacing(14)
+
+        self.full_widgets: dict[str, QWidget] = {}
+        full = self.window.config.full
+
+        def section(title: str) -> None:
+            h = label(title, 15, True)
+            h.setObjectName("sectionTitle")
+            root.addWidget(h)
+
+        def spacer(width: int, height: int) -> QWidget:
+            w = QWidget()
+            w.setFixedSize(width, height)
+            return w
+
+        def row(cfg_key: str, title: str, desc: str, control: QWidget) -> None:
+            self.full_widgets[cfg_key] = control
+            control.setObjectName(f"full_{cfg_key}")
+            root.addWidget(self.option_row(title, desc, control))
+
+        def check(cfg_key: str, value: bool) -> QCheckBox:
+            cb = QCheckBox("启用")
+            cb.setChecked(value)
+            return cb
+
+        def text(value: str, placeholder: str = "") -> QLineEdit:
+            le = QLineEdit()
+            le.setText(value)
+            if placeholder:
+                le.setPlaceholderText(placeholder)
+            return le
+
+        def combo(items: list[tuple[str, str]], current: str) -> QComboBox:
+            cb = QComboBox()
+            for txt, val in items:
+                cb.addItem(txt, val)
+            idx = cb.findData(current)
+            if idx >= 0:
+                cb.setCurrentIndex(idx)
+            return cb
+
+        def spin_int(value: int, lo: int, hi: int, unset: int = -1) -> QSpinBox:
+            sp = QSpinBox()
+            sp.setRange(lo, hi)
+            sp.setValue(value)
+            return sp
+
+        def spin_double(value: float, lo: float, hi: float, step: float = 0.1) -> QDoubleSpinBox:
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi)
+            sp.setSingleStep(step)
+            sp.setValue(value)
+            return sp
+
+        # ---- GPU 与设备 ----
+        section("GPU 与设备")
+        row("cuda_device", "CUDA 设备 ID", "逗号分隔列表，例如 0 或 0,1。留空则全部可见", text(full.cuda_device, "0,1"))
+        row("default_device", "默认设备 ID", "多卡时设为默认使用的设备 ID，其余仍可见。留 -1 不设置", spin_int(full.default_device, -1, 31))
+        row("directml", "DirectML 设备", "改用 torch-directml。关闭=不启用，自动=不传设备号", combo([("关闭", "-2"), ("自动", "-1"), ("0", "0"), ("1", "1"), ("2", "2")], str(full.directml)))
+        row("oneapi_device_selector", "oneAPI 设备选择", "oneAPI 设备选择字符串", text(full.oneapi_device_selector))
+        row("supports_fp8_compute", "声明支持 FP8 计算", "让 ComfyUI 当作设备支持 FP8 计算", check("supports_fp8_compute", full.supports_fp8_compute))
+        row("enable_triton_backend", "启用 Triton 后端", "启用 comfy-kitchen 的 Triton 后端，默认启动时关闭", check("enable_triton_backend", full.enable_triton_backend))
+        row("force_channels_last", "强制 channels-last", "推理时强制使用 channels-last 内存布局", check("force_channels_last", full.force_channels_last))
+        row("fp16_intermediates", "FP16 中间张量", "实验特性：节点间中间张量改用 FP16 而非 FP32", check("fp16_intermediates", full.fp16_intermediates))
+        row("fp64_unet", "扩散模型 FP64", "以 FP64 精度运行扩散模型", check("fp64_unet", full.fp64_unet))
+        row("fp8_e8m0fnu_unet", "扩散模型 FP8 e8m0fnu", "以 FP8 e8m0fnu 格式存储扩散模型权重", check("fp8_e8m0fnu_unet", full.fp8_e8m0fnu_unet))
+        row("force_non_blocking", "强制非阻塞操作", "强制所有适用张量使用非阻塞操作，部分非 Nvidia 设备可能更快但不稳", check("force_non_blocking", full.force_non_blocking))
+
+        # ---- 显存 / 缓存 ----
+        section("显存与缓存")
+        row("cache_ram", "RAM 压力缓存阈值", "以 GB 为单位的阈值，空格分隔（可选第二项为 inactive 阈值），例如 4 或 4 8", text(full.cache_ram, "4 8"))
+        row("high_ram", "高内存模式", "适合高内存或优先使用页面文件的环境，可略微提升性能", check("high_ram", full.high_ram))
+        row("reserve_vram", "预留显存(GB)", "为系统/其他程序预留的显存，留 0 表示不设置", spin_double(full.reserve_vram, 0, 64, 0.1))
+        row("vram_headroom", "DynamicVRAM 余量(GB)", "预留完全空闲的显存余量，留 0 使用默认", spin_double(full.vram_headroom, 0, 32, 0.1))
+        row("async_offload", "异步权重卸载", "自动=不启用，开启=默认 2 流，或填入自定义流数", combo([("自动", "auto"), ("开启(默认2流)", "on"), ("3 流", "3"), ("4 流", "4"), ("6 流", "6")], full.async_offload))
+        row("disable_async_offload", "禁用异步卸载", "关闭异步权重卸载", check("disable_async_offload", full.disable_async_offload))
+        row("disable_dynamic_vram", "禁用 DynamicVRAM", "改用基于估计的模型加载策略", check("disable_dynamic_vram", full.disable_dynamic_vram))
+        row("enable_dynamic_vram", "启用 DynamicVRAM", "在默认未开启的系统上启用 DynamicVRAM", check("enable_dynamic_vram", full.enable_dynamic_vram))
+        row("fast_disk", "快速磁盘模式", "优先磁盘动态加载/卸载，适合 NVMe；可改善部分用户体验", check("fast_disk", full.fast_disk))
+        row("disable_pinned_memory", "禁用 pinned memory", "关闭锁页内存，某些环境需要", check("disable_pinned_memory", full.disable_pinned_memory))
+        row("deterministic", "确定性算法", "让 PyTorch 使用更慢但确定性的算法，部分场景可复现但不能保证结果完全一致", check("deterministic", full.deterministic))
+
+        # ---- Attention 优化 ----
+        section("Cross-Attention 优化")
+        row("use_sage_attention", "使用 Sage Attention", "采用 sage attention 实现", check("use_sage_attention", full.use_sage_attention))
+        row("use_flash_attention", "使用 Flash Attention", "采用 FlashAttention 实现", check("use_flash_attention", full.use_flash_attention))
+        row("disable_xformers", "禁用 xformers", "关闭 xformers 优化", check("disable_xformers", full.disable_xformers))
+        row("force_upcast_attention", "强制上采样 Attention", "强制启用 attention 上采样，修复黑图可尝试", check("force_upcast_attention", full.force_upcast_attention))
+        row("dont_upcast_attention", "禁止上采样 Attention", "关闭所有 attention 上采样，除调试外一般不需要", check("dont_upcast_attention", full.dont_upcast_attention))
+
+        # ---- 文本编码器精度（额外变体）----
+        section("文本编码器精度")
+        row("fp16_text_enc", "FP16 文本编码器", "以 FP16 存储文本编码器权重", check("fp16_text_enc", full.fp16_text_enc))
+        row("fp32_text_enc", "FP32 文本编码器", "以 FP32 存储文本编码器权重", check("fp32_text_enc", full.fp32_text_enc))
+        row("bf16_text_enc", "BF16 文本编码器", "以 BF16 存储文本编码器权重", check("bf16_text_enc", full.bf16_text_enc))
+
+        # ---- 预览 ----
+        section("预览")
+        row("preview_size", "预览最大尺寸", "采样节点的最大预览图边长（像素）", spin_int(full.preview_size, 64, 2048))
+
+        # ---- 网络与服务端 ----
+        section("网络与服务端")
+        row("tls_keyfile", "TLS 密钥文件", "启用 HTTPS 所需密钥文件，需配合证书使用", text(full.tls_keyfile, "/path/to/key.pem"))
+        row("tls_certfile", "TLS 证书文件", "启用 HTTPS 所需证书文件", text(full.tls_certfile, "/path/to/cert.pem"))
+        row("max_upload_size", "最大上传体积(MB)", "上传体积上限", spin_double(full.max_upload_size, 1, 4096, 1))
+        row("enable_compress_response_body", "压缩响应体", "启用 HTTP 响应体压缩", check("enable_compress_response_body", full.enable_compress_response_body))
+        row("comfy_api_base", "Comfy API 基础 URL", "ComfyUI API 基础地址，留空使用默认 https://api.comfy.org", text(full.comfy_api_base, "https://api.comfy.org"))
+        row("database_url", "数据库 URL", "例如 sqlite:///:memory:。留空使用默认", text(full.database_url, "sqlite:///:memory:"))
+        row("enable_assets", "启用资源系统", "启用资源系统（API 路由、数据库同步、后台扫描）", check("enable_assets", full.enable_assets))
+        row("enable_asset_hashing", "资源哈希扫描", "扫描资源时计算 blake3 哈希，可去重但增加开销", check("enable_asset_hashing", full.enable_asset_hashing))
+        row("feature_flags", "特性开关", "逗号分隔，例如 show_signin_button=true,another_flag", text(full.feature_flags, "a=true,b"))
+
+        # ---- 目录 ----
+        section("目录与前端")
+        row("base_directory", "基础目录", "统一设置 models/custom_nodes/input/output/temp/user 的根目录", text(full.base_directory, "/path/to/base"))
+        row("temp_directory", "临时目录", "覆盖默认 temp 目录", text(full.temp_directory, "/path/to/temp"))
+        row("user_directory", "用户目录", "覆盖默认 user 目录", text(full.user_directory, "/path/to/user"))
+        row("front_end_version", "前端版本", "格式 [owner]/[repo]@[version]，例如 Comfy-Org/ComfyUI_frontend@latest", text(full.front_end_version, "Comfy-Org/ComfyUI_frontend@latest"))
+        row("front_end_root", "前端根目录", "本地前端目录路径，优先级高于前端版本", text(full.front_end_root, "/path/to/frontend"))
+        row("extra_model_paths_config", "额外模型路径配置", "空格分隔的 extra_model_paths.yaml 路径", text(full.extra_model_paths_config, "/path/extra_model_paths.yaml"))
+
+        # ---- 杂项 ----
+        section("杂项")
+        row("default_hashing_function", "哈希函数", "重复文件名/内容比对使用的哈希", combo([("默认(sha256)", ""), ("md5", "md5"), ("sha1", "sha1"), ("sha256", "sha256"), ("sha512", "sha512")], full.default_hashing_function))
+        row("mmap_torch_files", "mmap 加载 ckpt/pt", "加载 ckpt/pt 文件时使用 mmap", check("mmap_torch_files", full.mmap_torch_files))
+        row("disable_mmap", "禁用 mmap(safetensors)", "加载 safetensors 时不使用 mmap", check("disable_mmap", full.disable_mmap))
+        row("dont_print_server", "不打印服务端输出", "关闭服务端日志输出", check("dont_print_server", full.dont_print_server))
+        row("disable_metadata", "禁用元数据写入", "不在输出文件中保存 prompt 元数据", check("disable_metadata", full.disable_metadata))
+        row("disable_all_custom_nodes", "禁用所有自定义节点", "加载时不启用任何 custom_nodes", check("disable_all_custom_nodes", full.disable_all_custom_nodes))
+        row("whitelist_custom_nodes", "自定义节点白名单", "空格分隔，仅这些节点在禁用全部时仍加载", text(full.whitelist_custom_nodes, "ComfyUI-Manager"))
+        row("disable_api_nodes", "禁用 API 节点", "禁用所有 api 节点并阻止前端联网", check("disable_api_nodes", full.disable_api_nodes))
+        row("multi_user", "多用户模式", "启用按用户隔离存储", check("multi_user", full.multi_user))
+        row("verbose", "日志级别", "留空=默认 INFO", combo([("默认", ""), ("DEBUG", "DEBUG"), ("INFO", "INFO"), ("WARNING", "WARNING"), ("ERROR", "ERROR"), ("CRITICAL", "CRITICAL")], full.verbose))
+        row("log_stdout", "日志输出到 stdout", "常规进程输出改发到 stdout", check("log_stdout", full.log_stdout))
+        row("enable_manager", "启用 Manager", "启用 ComfyUI-Manager", check("enable_manager", full.enable_manager))
+        row("disable_manager_ui", "禁用 Manager UI", "仅关闭 Manager 界面与端点，后台任务仍运行", check("disable_manager_ui", full.disable_manager_ui))
+        row("enable_manager_legacy_ui", "Manager 传统界面", "启用 Manager 传统界面，隐含 --enable-manager", check("enable_manager_legacy_ui", full.enable_manager_legacy_ui))
+
+        self._setup_full_constraints()
+
+        root.addStretch(1)
+        outer.addWidget(scroll, 1)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        reset_btn = QPushButton(self.window._tr("button.reset", "恢复默认设置"))
+        reset_btn.clicked.connect(self.reset_full_params)
+        save_btn = QPushButton("保存完整参数")
+        save_btn.setObjectName("primary")
+        save_btn.clicked.connect(self.apply_full_params)
+        bottom.addWidget(reset_btn)
+        bottom.addWidget(save_btn)
+        hint = QLabel("参数会进入启动命令，在『一键启动』时生效。仅当填入值时才会覆盖默认。")
+        hint.setObjectName("footnote")
+        bottom.addWidget(hint)
+        outer.addLayout(bottom)
+        return page
+
+    def _setup_full_constraints(self) -> None:
+        """Wire mutually-exclusive ComfyUI flags so selecting one disables the rest.
+
+        Groups follow ComfyUI's own argparse mutually_exclusive groups, plus a
+        couple of logical pairs that are de-facto exclusive but parsed as plain
+        store_true flags.
+        """
+        self._action_handles: list = []  # prevent GC of lambdas
+
+        def group(keys: list[str]) -> None:
+            widgets = [self.full_widgets[k] for k in keys if k in self.full_widgets]
+            for w in widgets:
+                self._action_handles.append(w)
+                w.toggled.connect(lambda _=False, grp=widgets, src=w: self._enforce_group(grp, src))
+
+        # same-page strict groups (checkboxes)
+        group(["fp64_unet", "fp8_e8m0fnu_unet"])
+        group(["use_sage_attention", "use_flash_attention"])
+        group(["force_upcast_attention", "dont_upcast_attention"])
+        group(["disable_dynamic_vram", "enable_dynamic_vram"])
+        # text-encoder precision variants are pick-one
+        group(["fp16_text_enc", "fp32_text_enc", "bf16_text_enc"])
+        # enable-manager must stay on when its UI is disabled or legacy UI used
+        group_all = [
+            ("disable_manager_ui", "enable_manager_legacy_ui"),  # both off vs legacy
+        ]
+
+        # combo + checkbox logical pair: async offload
+        async_combo = self.full_widgets.get("async_offload")
+        async_disable = self.full_widgets.get("disable_async_offload")
+        if isinstance(async_combo, QComboBox) and isinstance(async_disable, QCheckBox):
+            async_combo.currentIndexChanged.connect(lambda _=False: self._enforce_async(async_combo, async_disable, async_combo))
+            async_disable.toggled.connect(lambda _=False: self._enforce_async(async_combo, async_disable, async_disable))
+            self._action_handles.extend([async_combo, async_disable])
+
+        # whitelist_custom_nodes only matters when disable_all_custom_nodes is on
+        disable_nodes = self.full_widgets.get("disable_all_custom_nodes")
+        wl = self.full_widgets.get("whitelist_custom_nodes")
+        if isinstance(disable_nodes, QCheckBox) and isinstance(wl, QLineEdit):
+            disable_nodes.toggled.connect(lambda _=False: self._enforce_whitelist(disable_nodes, wl))
+            self._action_handles.extend([disable_nodes, wl])
+
+        # Manager legacy UI requires Manager enabled -> cross-enable on toggle
+        lid = self.full_widgets.get("enable_manager_legacy_ui")
+        men = self.full_widgets.get("enable_manager")
+        if isinstance(lid, QCheckBox) and isinstance(men, QCheckBox):
+            lid.toggled.connect(lambda _=False: self._enforce_manager(men, lid))
+            men.toggled.connect(lambda _=False: self._enforce_manager(men, lid))
+            self._action_handles.extend([lid, men])
+
+        # cross-page: this tab's cuda-malloc-disable isn't in FullOptions; treat the
+        # 完整参数 tab alone. Apply initial derived states now (the toggled()
+        # signal above does not fire when a control starts unchecked, so we
+        # materialise the dependent states explicitly to avoid stale UI).
+        if "disable_all_custom_nodes" in self.full_widgets and "whitelist_custom_nodes" in self.full_widgets:
+            self._enforce_whitelist(self.full_widgets["disable_all_custom_nodes"], self.full_widgets["whitelist_custom_nodes"])
+        if "async_offload" in self.full_widgets and "disable_async_offload" in self.full_widgets:
+            self._enforce_async(self.full_widgets["async_offload"], self.full_widgets["disable_async_offload"])
+        if "enable_manager" in self.full_widgets and "enable_manager_legacy_ui" in self.full_widgets:
+            self._enforce_manager(self.full_widgets["enable_manager"], self.full_widgets["enable_manager_legacy_ui"])
+
+    def _enforce_group(self, grp: list, src) -> None:
+        """Within a pick-one group, checking one disables the others."""
+        if not isinstance(src, QCheckBox) or not src.isChecked():
+            return
+        for other in grp:
+            if other is src:
+                continue
+            other.blockSignals(True)
+            other.setChecked(False)
+            other.blockSignals(False)
+
+    def _enforce_async(self, combo: QComboBox, disable_check: QCheckBox, src=None) -> None:
+        # async-offload is pick-one-OR-auto: a specific stream count ("on")
+        # conflicts with --disable-async-offload. Whichever control the user
+        # just moved wins; on init (src=None) preferring 'on' is safer.
+        if combo.currentData() != "auto" and disable_check.isChecked():
+            if src is disable_check:
+                combo.blockSignals(True)
+                idx = combo.findData("auto")
+                combo.setCurrentIndex(idx if idx >= 0 else 0)
+                combo.blockSignals(False)
+            else:
+                disable_check.blockSignals(True)
+                disable_check.setChecked(False)
+                disable_check.blockSignals(False)
+
+    def _enforce_whitelist(self, disable_nodes: QCheckBox, wl: QLineEdit) -> None:
+        wl.setEnabled(disable_nodes.isChecked())
+
+    def _enforce_manager(self, men: QCheckBox, lid: QCheckBox) -> None:
+        if lid.isChecked() and not men.isChecked():
+            men.blockSignals(True)
+            men.setChecked(True)
+            men.blockSignals(False)
+
+    def refresh_full_params(self) -> None:
+        full = self.window.config.full
+        # Pull current values back to the controls so switching tabs reflects
+        # any external changes.
+        for key, widget in getattr(self, "full_widgets", {}).items():
+            if not hasattr(full, key):
+                continue
+            value = getattr(full, key)
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, QSpinBox):
+                widget.setValue(int(value))
+            elif isinstance(widget, QDoubleSpinBox):
+                widget.setValue(float(value))
+            elif isinstance(widget, QComboBox):
+                idx = widget.findData(str(value))
+                if idx >= 0:
+                    widget.setCurrentIndex(idx)
+            elif isinstance(widget, QLineEdit):
+                widget.setText(str(value if value is not None else ""))
+
+    def apply_full_params(self) -> None:
+        full = self.window.config.full
+        for key, widget in self.full_widgets.items():
+            if isinstance(widget, QCheckBox):
+                value = widget.isChecked()
+            elif isinstance(widget, QSpinBox):
+                value = widget.value()
+            elif isinstance(widget, QDoubleSpinBox):
+                value = widget.value()
+            elif isinstance(widget, QComboBox):
+                value = widget.currentData()
+                # directml stored as int
+                if key == "directml":
+                    value = int(value)
+            elif isinstance(widget, QLineEdit):
+                value = widget.text().strip()
+            else:
+                continue
+            setattr(full, key, value)
+        self.window.save_config()
+        QMessageBox.information(self, "已保存", "完整参数已保存。")
+
+    def reset_full_params(self) -> None:
+        from aura_rift.config import FullOptions
+        self.window.config.full = FullOptions()
+        self.window.save_config()
+        self.refresh_full_params()
+        QMessageBox.information(self, "已重置", "完整参数已恢复默认。")
+
     def _build_maintenance(self) -> QWidget:
         page = QWidget()
         root = QVBoxLayout(page)
@@ -609,7 +947,7 @@ class AdvancedPage(QWidget):
         self.apply_launch_options()
         comfy = self.window.comfy_dir()
         python = environment.resolve_python(comfy, self.window.config.python_path_override, self.window.config.venv_manager)
-        args = [str(comfy / "main.py"), *self.window.config.launch.to_args()]
+        args = [str(comfy / "main.py"), *self.window.config.launch.to_args(), *self.window.config.full.to_args()]
         command = " ".join(shlex.quote(str(part)) for part in [python, *args])
         self.window.show_page("console")
         self.window.append_log(command + "\n")
@@ -657,9 +995,13 @@ class AdvancedPage(QWidget):
 
 
 class VersionPage(QWidget):
+    extensions_loaded = Signal(list)
+
     def __init__(self, window: "MainWindow") -> None:
         super().__init__()
         self.window = window
+        self._install_loading = False
+        self.extensions_loaded.connect(self._on_extensions_loaded)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -763,20 +1105,19 @@ class VersionPage(QWidget):
         self.extension_table = QTableWidget(0, 6)
         self.extension_table.setHorizontalHeaderLabels(["扩展名", "分支", "版本", "状态", "路径", "操作"])
         header = self.extension_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Interactive)
         header.setSectionResizeMode(3, QHeaderView.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.Stretch)
         header.setSectionResizeMode(5, QHeaderView.Interactive)
-        header.setStretchLastSection(True)
-        self.extension_table.setColumnWidth(0, 220)
+        header.setStretchLastSection(False)
         self.extension_table.setColumnWidth(1, 140)
-        self.extension_table.setColumnWidth(2, 100)
-        self.extension_table.setColumnWidth(3, 90)
-        self.extension_table.setColumnWidth(4, 300)
-        self.extension_table.setColumnWidth(5, 80)
+        self.extension_table.setColumnWidth(2, 110)
+        self.extension_table.setColumnWidth(3, 96)
+        self.extension_table.setColumnWidth(5, 104)
         self.extension_table.verticalHeader().setVisible(False)
+        self.extension_table.verticalHeader().setDefaultSectionSize(44)
         self.extension_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.extension_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         root.addWidget(self.extension_table, 1)
@@ -829,24 +1170,59 @@ class VersionPage(QWidget):
 
         # Extension list in a scroll area
         self.extension_install_list = QTableWidget(0, 5)
+        self.extension_installed_rows: set[int] = set()
+        self._current_page = 0
+        self._page_size = 100
+        self._filtered_extensions: list[ExtensionEntry] = []
         self.extension_install_list.setHorizontalHeaderLabels(["插件名称", "作者", "类别", "状态", "操作"])
         header = self.extension_install_list.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Interactive)
         header.setSectionResizeMode(3, QHeaderView.Interactive)
         header.setSectionResizeMode(4, QHeaderView.Interactive)
-        header.setStretchLastSection(True)
-        self.extension_install_list.setColumnWidth(0, 300)
+        header.setStretchLastSection(False)
         self.extension_install_list.setColumnWidth(1, 160)
         self.extension_install_list.setColumnWidth(2, 120)
         self.extension_install_list.setColumnWidth(3, 80)
-        self.extension_install_list.setColumnWidth(4, 90)
+        self.extension_install_list.setColumnWidth(4, 104)
         self.extension_install_list.verticalHeader().setVisible(False)
+        self.extension_install_list.verticalHeader().setDefaultSectionSize(44)
         self.extension_install_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.extension_install_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.extension_install_list.setMinimumHeight(300)
         root.addWidget(self.extension_install_list, 1)
+
+        # Pagination toolbar
+        pager = QHBoxLayout()
+        pager.setSpacing(6)
+        self.page_first = QPushButton("首页")
+        self.page_prev = QPushButton("上一页")
+        self.page_next = QPushButton("下一页")
+        self.page_last = QPushButton("末页")
+        self.page_first.setObjectName("flat")
+        self.page_prev.setObjectName("flat")
+        self.page_next.setObjectName("flat")
+        self.page_last.setObjectName("flat")
+        self.page_first.clicked.connect(lambda: self.go_to_page(0))
+        self.page_prev.clicked.connect(lambda: self.go_to_page(self._current_page - 1))
+        self.page_next.clicked.connect(lambda: self.go_to_page(self._current_page + 1))
+        self.page_last.clicked.connect(lambda: self.go_to_page(-1))
+        self.page_label = label("", 12)
+        self.page_spin = QSpinBox()
+        self.page_spin.setFixedWidth(70)
+        self.page_spin.setMinimum(1)
+        self.page_spin.valueChanged.connect(self._on_page_spin_changed)
+        pager.addStretch(1)
+        pager.addWidget(self.page_first)
+        pager.addWidget(self.page_prev)
+        pager.addWidget(self.page_label)
+        pager.addWidget(self.page_next)
+        pager.addWidget(self.page_last)
+        pager.addSpacing(12)
+        pager.addWidget(self.page_spin)
+        self.page_bar = self._wrap_layout(pager)
+        root.addWidget(self.page_bar)
 
         # Manual URL install (kept at bottom)
         url_card = card()
@@ -877,27 +1253,78 @@ class VersionPage(QWidget):
         filtered = search_entries(self.all_extensions, query)
         self._populate_extension_list(filtered)
 
+    def _wrap_layout(self, layout: QHBoxLayout) -> QWidget:
+        widget = QWidget()
+        widget.setLayout(layout)
+        return widget
+
     def _populate_extension_list(self, entries: list[ExtensionEntry]) -> None:
+        self._filtered_extensions = entries
+        self._current_page = 0
+        self._render_install_page()
+
+    def _render_install_page(self) -> None:
+        total = len(self._filtered_extensions)
+        size = self._page_size
+        last_page = max(0, (total - 1) // size) if total else 0
+        if self._current_page < 0:
+            self._current_page = 0
+        if self._current_page > last_page:
+            self._current_page = last_page
+        start = self._current_page * size
+        shown = self._filtered_extensions[start:start + size]
+
         self.extension_install_list.setUpdatesEnabled(False)
         self.extension_install_list.setRowCount(0)
-        cap = 200
-        shown = entries[:cap]
         self.extension_install_list.setRowCount(len(shown))
         for row, entry in enumerate(shown):
             self.extension_install_list.setItem(row, 0, QTableWidgetItem(entry.title))
             self.extension_install_list.setItem(row, 1, QTableWidgetItem(entry.author))
             self.extension_install_list.setItem(row, 2, QTableWidgetItem(entry.category))
             self.extension_install_list.setItem(row, 3, QTableWidgetItem("已安装" if entry.installed else "未安装"))
-            self.extension_install_list.setItem(row, 4, QTableWidgetItem(entry.repository_url))
             button_text = "已安装" if entry.installed else "安装"
             button = QPushButton(button_text)
             button.setEnabled(not entry.installed)
+            button.setFixedHeight(30)
             if not entry.installed:
                 button.clicked.connect(lambda _=False, url=entry.repository_url: self._install_from_url(url))
             self.extension_install_list.setCellWidget(row, 4, button)
         self.extension_install_list.setUpdatesEnabled(True)
-        total = len(entries)
-        self.extension_count_label.setText(f"共 {total} 个扩展，显示前 {cap} 个" if total > cap else f"共 {total} 个扩展")
+
+        page_count = last_page + 1
+        page_idx = self._current_page + 1
+        self.page_label.setText(f"{page_idx} / {page_count} 页")
+        self.count_label_total = total
+        if total:
+            self.extension_count_label.setText(
+                f"共 {total} 个扩展，当前第 {page_idx}/{page_count} 页（第 {start + 1}-{start + len(shown)} 项）"
+            )
+        else:
+            self.extension_count_label.setText("未找到扩展")
+        has_pages = page_count > 1
+        for w in (self.page_first, self.page_prev, self.page_next, self.page_last, self.page_spin):
+            w.setEnabled(has_pages)
+        if has_pages:
+            self.page_spin.blockSignals(True)
+            self.page_spin.setRange(1, page_count)
+            self.page_spin.setValue(page_idx)
+            self.page_spin.blockSignals(False)
+        self.page_first.setEnabled(has_pages and self._current_page > 0)
+        self.page_prev.setEnabled(has_pages and self._current_page > 0)
+        self.page_next.setEnabled(has_pages and self._current_page < last_page)
+        self.page_last.setEnabled(has_pages and self._current_page < last_page)
+
+    def go_to_page(self, page: int) -> None:
+        if page == -1:
+            total = len(self._filtered_extensions)
+            size = self._page_size
+            page = max(0, (total - 1) // size) if total else 0
+        self._current_page = page
+        self._render_install_page()
+
+    def _on_page_spin_changed(self, value: int) -> None:
+        self._current_page = value - 1
+        self._render_install_page()
 
     def _install_from_url(self, url: str) -> None:
         self.plugin_url.setText(url)
@@ -923,9 +1350,34 @@ class VersionPage(QWidget):
         custom_nodes = comfy / "custom_nodes"
         manager = custom_nodes / "ComfyUI-Manager"
         self.manager_label.setText("ComfyUI-Manager：已安装" if manager.exists() else "ComfyUI-Manager：未安装")
-        # Reload from disk only if we haven't loaded yet
-        if not self.all_extensions:
-            self.all_extensions = get_extensions(comfy)
+        # Already loaded: just re-mark installed state and refresh the table (fast).
+        if self.all_extensions:
+            self.all_extensions = mark_installed(self.all_extensions, custom_nodes)
+            self.filter_extensions()
+            return
+        # Avoid stacking concurrent loads.
+        if self._install_loading:
+            return
+        self._install_loading = True
+        self._populate_extension_list([])
+        self.extension_count_label.setText("正在加载扩展列表…")
+        import threading
+        comfy_path = str(comfy)
+
+        def worker() -> None:
+            try:
+                entries = get_extensions(Path(comfy_path))
+            except Exception:
+                entries = []
+            # marshal back to the GUI thread via a queued signal
+            self.extensions_loaded.emit(entries)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_extensions_loaded(self, entries: list) -> None:
+        self._install_loading = False
+        self.all_extensions = entries
+        custom_nodes = self.window.comfy_dir() / "custom_nodes"
         self.all_extensions = mark_installed(self.all_extensions, custom_nodes)
         self.filter_extensions()
 
@@ -953,13 +1405,17 @@ class VersionPage(QWidget):
         try:
             git = GitService(comfy)
             self.remote_label.setText(f"远程地址：{git.remote_url()}")
-            self.branch_label.setText(f"当前分支：{git.current_branch()}")
+            branch = git.current_branch()
+            self.branch_label.setText(f"当前分支：{branch or '-'}")
             current = git.current_commit()
-            self.commit_label.setText(f"当前版本：{current}")
+            self.commit_label.setText(
+                f"当前版本：{current[:8]}" if current else "当前版本：尚未有任何提交（空仓库）"
+            )
             if self.window.config.expert_mode:
+                self.branch_combo.clear()
                 for branch in git.branches():
                     self.branch_combo.addItem(branch)
-                index = self.branch_combo.findText(git.current_branch())
+                index = self.branch_combo.findText(branch)
                 if index >= 0:
                     self.branch_combo.setCurrentIndex(index)
             else:
@@ -980,6 +1436,8 @@ class VersionPage(QWidget):
             self.commit_table.setUpdatesEnabled(True)
         except GitError as exc:
             self.remote_label.setText(f"远程地址：读取失败：{exc}")
+            self.branch_label.setText("当前分支：读取失败")
+            self.commit_label.setText("当前版本：读取失败")
 
     def refresh_extensions(self) -> None:
         custom_nodes = self.window.comfy_dir() / "custom_nodes"
@@ -1009,6 +1467,7 @@ class VersionPage(QWidget):
                 self.extension_table.setItem(row, 3, QTableWidgetItem("非 Git 扩展"))
             uninstall_btn = QPushButton("卸载")
             uninstall_btn.setObjectName("danger")
+            uninstall_btn.setFixedHeight(30)
             uninstall_btn.clicked.connect(lambda _=False, p=child: self._uninstall_extension(p))
             self.extension_table.setCellWidget(row, 5, uninstall_btn)
         self.extension_table.setUpdatesEnabled(True)
@@ -1415,10 +1874,13 @@ class MainWindow(QMainWindow):
         title = QFrame()
         title.setObjectName("titleBar")
         title_layout = QHBoxLayout(title)
-        title_layout.setContentsMargins(18, 8, 18, 8)
-        title_layout.addWidget(label(f"{APP_NAME} {__version__}", 17, True))
+        title_layout.setContentsMargins(22, 10, 18, 10)
+        title_layout.addWidget(label(APP_NAME, 16, True))
+        version_tag = QLabel(__version__)
+        version_tag.setObjectName("footnote")
+        title_layout.addWidget(version_tag)
         title_layout.addStretch(1)
-        icon_color = "#f0f0f0" if self.config.theme == "dark" else "#222222"
+        icon_color = "#e8e8ee" if self.config.theme == "dark" else "#2a2f37"
         theme_button = QPushButton(make_lightbulb_icon(icon_color), "")
         theme_button.setObjectName("flat")
         theme_button.setToolTip("切换深色/浅色主题")
@@ -1458,29 +1920,40 @@ class MainWindow(QMainWindow):
     def build_sidebar(self) -> QWidget:
         side = QFrame()
         side.setObjectName("sideBar")
-        side.setFixedWidth(108)
+        side.setFixedWidth(132)
         layout = QVBoxLayout(side)
-        layout.setContentsMargins(8, 18, 8, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(10, 18, 10, 18)
+        layout.setSpacing(8)
         group = QButtonGroup(side)
         group.setExclusive(True)
+        accent = "#38bdb2" if self.config.theme != "light" else "#1aa090"
+        # fixed button dimensions so every nav entry has identical width/height
+        # and icons line up on a consistent baseline regardless of label length
+        button_w = 132 - 10 - 10
+        button_h = 78
+        icon_size = QSize(28, 28)
         items = [
-            ("launch", self._tr("nav.launch", "一键启动")),
-            ("advanced", self._tr("nav.advanced", "高级选项")),
-            ("versions", self._tr("nav.versions", "版本管理")),
-            ("tools", self._tr("nav.tools", "小工具")),
-            ("console", self._tr("nav.console", "控制台")),
-            ("settings", self._tr("nav.settings", "设置")),
+            ("launch", "rocket", self._tr("nav.launch", "一键启动")),
+            ("advanced", "sliders", self._tr("nav.advanced", "高级选项")),
+            ("versions", "git-branch", self._tr("nav.versions", "版本管理")),
+            ("tools", "wrench", self._tr("nav.tools", "小工具")),
+            ("console", "terminal", self._tr("nav.console", "控制台")),
+            ("settings", "settings", self._tr("nav.settings", "设置")),
         ]
-        for name, text in items:
-            button = QPushButton(text)
+        for name, icon_name, text in items:
+            button = QToolButton()
             button.setObjectName("navButton")
             button.setCheckable(True)
-            button.setMinimumHeight(58)
+            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            button.setIcon(make_nav_icon(icon_name, accent, icon_size.width()))
+            button.setIconSize(icon_size)
+            button.setText(text)
+            button.setFixedSize(button_w, button_h)
+            button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             button.clicked.connect(lambda _=False, n=name: self.show_page(n))
             self.nav_buttons[name] = button
             group.addButton(button)
-            layout.addWidget(button)
+            layout.addWidget(button, 0, Qt.AlignCenter)
             if name == "tools":
                 layout.addStretch(1)
         return side

@@ -39,6 +39,7 @@ ZH_CN: dict[str, str] = {
     # Advanced page
     "adv.title": "高级选项",
     "maint.title": "环境维护",
+    "adv.full": "完整参数",
     "adv.vram": "显存优化",
     "adv.vram.desc": "选择 ComfyUI 显存策略",
     "adv.attention": "Cross-Attention 优化方案",

@@ -49,6 +49,18 @@ class GitService:
         if not self.exists:
             raise GitError("当前目录不是 Git 仓库")
 
+    def _has_head(self) -> bool:
+        """True if HEAD points at a resolvable commit (repo has at least one commit)."""
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+            cwd=str(self.repo_path),
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        return proc.returncode == 0
+
     def remote_url(self) -> str:
         self.ensure_repo()
         try:
@@ -65,6 +77,8 @@ class GitService:
 
     def current_commit(self) -> str:
         self.ensure_repo()
+        if not self._has_head():
+            return ""
         return _run_git(self.repo_path, ["rev-parse", "HEAD"])
 
     def is_dirty(self) -> bool:
@@ -87,6 +101,8 @@ class GitService:
 
     def commits(self, limit: int = 120) -> list[CommitInfo]:
         self.ensure_repo()
+        if not self._has_head():
+            return []
         current = self.current_commit()
         fmt = "%h%x1f%H%x1f%cd%x1f%s"
         output = _run_git(
@@ -112,7 +128,7 @@ class GitService:
 
     def tags(self, limit: int = 50) -> list[CommitInfo]:
         self.ensure_repo()
-        current = self.current_commit()
+        current = self.current_commit() or ""
         fmt = "%(refname:short)|%(objectname)|%(creatordate:iso-strict)|%(contents:subject)"
         output = _run_git(
             self.repo_path,
