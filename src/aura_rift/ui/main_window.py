@@ -92,6 +92,91 @@ def make_lightbulb_icon(color: str) -> QIcon:
     return QIcon(pixmap)
 
 
+import re
+import unicodedata
+
+# Common ANSI escape sequences emitted by tools (color, cursor moves, clears).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+# Other control characters that don't render as glyphs (keep \n / \t).
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# A curated map of common emojis to short ASCII labels, used only as a fallback
+# when no emoji-capable font is installed (so the console never shows tofu boxes).
+_EMOJI_MAP = {
+    "\U0001f525": "[fire] ",
+    "\U0001f4a1": "[tip] ",
+    "\u2714": "[ok] ",
+    "\u2716": "[x] ",
+    "\u26a0": "[warn] ",
+}
+
+
+def _emoji_font_available() -> bool:
+    """True when a font capable of rendering emoji glyphs is registered with Qt."""
+    from PySide6.QtGui import QFontDatabase
+    for fam in QFontDatabase.families():
+        if "emoji" in fam.lower():
+            return True
+    return False
+
+
+# Detected on first call, then cached. Refreshed lazily so apps that install
+# fonts before the first window opens still pick them up.
+_EMOJI_AVAILABLE: bool | None = None
+
+
+def _normalize_log(text: str) -> str:
+    """Clean subprocess output for display in the monospace console.
+
+    Always strips ANSI escapes and stray control characters (the console renders
+    plain text, so color codes would only show as escape noise) and collapses
+    carriage-return progress lines to their final segment.
+
+    Emoji / arrow / box-drawing glyphs are left untouched when an
+    emoji-capable font is installed; otherwise they fall back to ASCII or short
+    text labels so nothing renders as a missing-glyph box.
+    """
+    global _EMOJI_AVAILABLE
+    if not text:
+        return text
+    if _EMOJI_AVAILABLE is None:
+        _EMOJI_AVAILABLE = _emoji_font_available()
+    emoji_ok = _EMOJI_AVAILABLE
+
+    text = _ANSI_RE.sub("", text)
+    text = _CTRL_RE.sub("", text)
+    cleaned_lines = []
+    for line in text.split("\n"):
+        last = line.rsplit("\r", 1)[-1] if "\r" in line else line
+        if not emoji_ok:
+            last = re.sub(r"[\ue000-\uf8ff]", "-", last)
+            last = (
+                last.replace("\u2192", "->")
+                    .replace("\u2190", "<-")
+                    .replace("\u25b8", ">")
+                    .replace("\u25c2", "<")
+                    .replace("\u25b6", ">")
+                    .replace("\u25c0", "<]")
+            )
+        cleaned_lines.append(last)
+    text = "\n".join(cleaned_lines)
+
+    if emoji_ok:
+        return text
+
+    for emoji, label in _EMOJI_MAP.items():
+        text = text.replace(emoji, label)
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        cat = unicodedata.category(ch)
+        if cat == "So" or cp >= 0x1F000 or (0xE000 <= cp <= 0xF8FF):
+            out.append("?")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def hline() -> QFrame:
     line = QFrame()
     line.setFrameShape(QFrame.HLine)
@@ -200,6 +285,7 @@ class ConsolePage(QWidget):
         layout.addWidget(self.output, 1)
 
     def append(self, text: str) -> None:
+        text = _normalize_log(text)
         self.output.moveCursor(QTextCursor.End)
         self.output.insertPlainText(text)
         self.output.moveCursor(QTextCursor.End)
