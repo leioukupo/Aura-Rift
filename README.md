@@ -32,6 +32,80 @@ python -m aura_rift
 aura-rift
 ```
 
+## 字体安装（用于控制台显示 emoji 与等宽日志）
+
+启动器自带控制台会清洗子进程输出（剥离 ANSI 转义、折叠进度条、把箭头/几何字符转 ASCII、emoji 转文字标签），所以即使不装字体也能看到干净日志。
+
+但若想在控制台看到原生的彩色 emoji 和更美观的等宽字体，建议安装以下字体（可二选一或全部安装）。
+
+### 1）彩色 emoji 字体
+
+Debian / Ubuntu：
+
+```bash
+sudo apt update
+sudo apt install fonts-noto-color-emoji
+```
+
+Fedora：
+
+```bash
+sudo dnf install google-noto-color-emoji-fonts
+```
+
+Arch：
+
+```bash
+sudo pacman -S noto-fonts-emoji
+```
+
+openSUSE：
+
+```bash
+sudo zypper install noto-color-emoji-font
+```
+
+安装后刷新字体缓存：
+
+```bash
+fc-cache -fv
+```
+
+用 `fc-match emoji` 验证，应输出 `NotoColorEmoji.ttf: "Noto Color Emoji"`。
+
+### 2）等宽字体（可选，控制台更好看）
+
+Debian / Ubuntu：
+
+```bash
+sudo apt install fonts-jetbrains-mono          # 或 fonts-hack
+```
+
+Fedora：
+
+```bash
+sudo dnf install jetbrains-mono-fonts-all
+```
+
+Arch：
+
+```bash
+sudo pacman -S ttf-jetbrains-mono
+```
+
+安装后刷新缓存：
+
+```bash
+fc-cache -fv
+```
+
+### 备注
+
+- 控制台主题里写死了 `JetBrains Mono` -> `Cascadia Code` -> `Consolas` -> 默认等宽字体回退顺序；装了 `fonts-jetbrains-mono` 就直接生效，没装则自动回退。
+- emoji / 箭头 / box-drawing 字体的显示是**自动适配**的：启动器会在每次运行时检测系统里是否存在 emoji 字体（`fonts-noto-color-emoji` 等）。**装了字体** → 控制台直接显示原生 emoji（如 🔥 →、箭头 →），彩色且原样保留；**没装字体** → 自动回退为 ASCII 替用 `[fire]`、`->` 等文字标签，避免缺字符方块（tofu）。这种切换无需重启启动器，首次刷新控制台即生效。
+- ANSI 颜色转义码（绘制命令内部的颜色）总是被剥离，控制台无颜色渲染。
+- 仓库要求清单中已包含 `libxkbcommon-x11-0` 等 Qt 运行依赖；字体为可选增强，不影响启动器基本运行。
+
 ## 说明
 
 - Linux 下优先使用 `xdg-open` 打开文件夹；如果桌面文件管理器不可用，会回退到内置文件浏览器。
