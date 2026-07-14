@@ -1569,8 +1569,7 @@ class VersionPage(QWidget):
     def update_core(self) -> None:
         try:
             git = GitService(self.window.comfy_dir())
-            if git.is_dirty():
-                raise DirtyRepositoryError("检测到未提交的本地修改，已阻止更新")
+            git.assert_clean("更新")
         except (DirtyRepositoryError, GitError) as exc:
             QMessageBox.warning(self, "已阻止", str(exc))
             self.window.append_log(f"更新 ComfyUI 已阻止：{exc}\n")

@@ -10,7 +10,14 @@ class GitError(RuntimeError):
 
 
 class DirtyRepositoryError(GitError):
-    pass
+    """Raised when a local change would block a version movement.
+
+    `files` optionally carries the offending paths so the UI can list them.
+    """
+
+    def __init__(self, message: str, files: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.files = files or []
 
 
 @dataclass
@@ -81,9 +88,77 @@ class GitService:
             return ""
         return _run_git(self.repo_path, ["rev-parse", "HEAD"])
 
-    def is_dirty(self) -> bool:
+    def dirty_files(self, include_custom_nodes: bool = False) -> list[str]:
+        """Return repository-relative paths with uncommitted changes.
+
+        By default custom_nodes/ is excluded, because user-installed plugins
+        live there and their modifications should never block ComfyUI version
+        switches. Pass include_custom_nodes=True to include them.
+        """
         self.ensure_repo()
-        return bool(_run_git(self.repo_path, ["status", "--porcelain"]))
+        if not self._has_head():
+            return []
+        # Use subprocess directly (not _run_git) because git status --porcelain uses a leading space to mean "not staged", and _run_git strips it.
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all", "--no-renames"],
+            cwd=str(self.repo_path),
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise GitError(proc.stderr.strip() or "git status failed")
+        raw = proc.stdout
+        files: list[str] = []
+        for line in raw.splitlines():
+            if not line:
+                continue
+            path = line[3:]  # drop the two status chars + a space
+            # quoted when the path contains whitespace/non-ascii
+            if path.startswith('"') and path.endswith('"'):
+                from shlex import shlex
+                try:
+                    tokens = list(shlex(path, posix=True))
+                    if tokens:
+                        path = tokens[0]
+                except ValueError:
+                    path = path.strip('"')
+            # only the path part before ' -> ' for renames (we passed --no-renames
+            # so this should be the plain path, but be defensive)
+            path = path.split(" -> ", 1)[-1]
+            if not include_custom_nodes and (path == "custom_nodes" or path.startswith("custom_nodes/")):
+                continue
+            files.append(path)
+        return files
+
+    def is_dirty(self, include_custom_nodes: bool = False) -> bool:
+        self.ensure_repo()
+        return bool(self.dirty_files(include_custom_nodes=include_custom_nodes))
+
+    def _dirty_error(self, action: str) -> DirtyRepositoryError | None:
+        """Build a DirtyRepositoryError listing the dirty ComfyUI core files,
+        or None when the repo (minus custom_nodes) is clean."""
+        files = self.dirty_files()
+        if not files:
+            return None
+        listing = "\n".join("  · " + f for f in files[:30])
+        extra = f"\n  …等共 {len(files)} 个" if len(files) > 30 else ""
+        return DirtyRepositoryError(
+            f"检测到未提交的本地修改，已阻止{action}。\n以下 ComfyUI 本体文件改动未提交:\n" + listing + extra,
+            files,
+        )
+
+    def assert_clean(self, action: str = "操作") -> None:
+        """Raise DirtyRepositoryError if ComfyUI core files have uncommitted changes.
+
+        custom_nodes/ is ignored so plugin modifications never block the
+        operation; only ComfyUI's own tracked files are reported.
+        """
+        self.ensure_repo()
+        err = self._dirty_error(action)
+        if err is not None:
+            raise err
 
     def branches(self) -> list[str]:
         self.ensure_repo()
@@ -157,13 +232,15 @@ class GitService:
 
     def checkout(self, revision: str, allow_dirty: bool = False) -> None:
         self.ensure_repo()
-        if self.is_dirty() and not allow_dirty:
-            raise DirtyRepositoryError("检测到未提交的本地修改，已阻止切换版本")
+        if not allow_dirty:
+            err = self._dirty_error("切换版本")
+            if err is not None:
+                raise err
         _run_git(self.repo_path, ["checkout", revision], timeout=120)
 
     def pull_fast_forward(self) -> None:
         self.ensure_repo()
-        if self.is_dirty():
-            raise DirtyRepositoryError("检测到未提交的本地修改，已阻止更新")
+        err = self._dirty_error("更新")
+        if err is not None:
+            raise err
         _run_git(self.repo_path, ["pull", "--ff-only"], timeout=180)
-
