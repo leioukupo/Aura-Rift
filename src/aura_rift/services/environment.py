@@ -348,15 +348,14 @@ def _norm(name):
     return re.sub(r"[-_.]+", "-", name).lower()
 
 try:
-    dists = {md.distribution(_).metadata.get("Name", "") for _ in md.distributions()}
-    installed = {_norm(_): _ for _ in dists if _}
+    installed = {}
     versions = {}
     for dist in md.distributions():
         n = dist.metadata.get("Name", "")
         if n:
             installed[_norm(n)] = n
             try:
-                versions[_norm(n)] = md.version(n)
+                versions[_norm(n)] = dist.version
             except Exception:
                 pass
 except Exception:
@@ -378,6 +377,9 @@ def parse_line(line):
             req = Requirement(s)
             name = req.name
             spec = str(req.specifier) if req.specifier else ""
+            # Cancel requirements whose environment marker excludes this platform.
+            if req.marker is not None and not req.marker.evaluate():
+                return None
             return _norm(name), name, spec
         except Exception:
             pass
@@ -385,9 +387,10 @@ def parse_line(line):
     if m:
         name = m.group(1)
         rest = m.group(3).strip()
-        marker = ""
+        # Without packaging, drop anything with an environment marker (we
+        # can't safely evaluate it) rather than risk a false positive.
         if ";" in rest:
-            rest, _, marker = rest.partition(";")
+            return None
         return _norm(name), name, rest.strip()
     return None
 
