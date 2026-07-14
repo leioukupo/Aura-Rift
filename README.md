@@ -14,6 +14,7 @@ Aura-Rift 是一个面向 Linux 的 ComfyUI 启动器，界面参考 ComfyUI-Aki
 - 扩展目录查看、更新，以及 Git URL 安装
 - 安装或更新 ComfyUI-Manager
 - 高级启动参数、Python 路径覆盖、代理和 PyPI 镜像设置
+- 启动前依赖检查：一键启动时自动核对 ComfyUI 本体 `requirements.txt` 与所有 `custom_nodes/*/requirements.txt`，缺失的依赖给用户选择「安装并启动」/「直接启动」/「取消」；选择安装时按当前 venv 管理器（venv/poetry/pdm/uv/conda）跑 `pip install -r`，装完自动启动；未建 .venv 时跳过检查直接启动
 - 深色/浅色主题切换
 
 ## 运行

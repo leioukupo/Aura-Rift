@@ -56,7 +56,9 @@ from aura_rift.services.comfy import (
     create_venv_commands,
     install_comfy_commands,
     install_manager_commands,
+    install_missing_deps_commands,
     install_plugin_command,
+    install_requirements_command,
     reinstall_package_command,
 )
 from aura_rift.services.files import directory_size_hint, ensure_dir, open_path
@@ -1926,6 +1928,8 @@ class SettingsPage(QWidget):
 
 
 class MainWindow(QMainWindow):
+    deps_checked = Signal(object)
+
     def __init__(self) -> None:
         super().__init__()
         self.config_store = ConfigStore()
@@ -1935,6 +1939,9 @@ class MainWindow(QMainWindow):
         self.current_task: TaskHandle | None = None
         self.nav_buttons: dict[str, QPushButton] = {}
         self.pages: dict[str, QWidget] = {}
+        self._pending_launch = False
+        self._precheck_worker = None
+        self.deps_checked.connect(self._on_deps_checked)
 
         self.setWindowTitle(APP_NAME)
         self.resize(1280, 820)
@@ -2080,7 +2087,94 @@ class MainWindow(QMainWindow):
             self.console_page.set_status(state)
 
     def start_comfy(self) -> None:
+        """Begin the launch flow: precheck dependencies, then launch.
+
+        The precheck only makes sense against the interpreter ComfyUI will
+        actually run on. resolve_python falls back to the launcher's own
+        interpreter when no .venv / python override / conda env is available,
+        so in that case we skip the check rather than reporting noise against an
+        interpreter the user has no intention of running ComfyUI in.
+        """
         self.config_store.save(self.config)
+        self.show_page("console")
+        comfy = self.comfy_dir()
+        if not (comfy / "main.py").exists():
+            self.append_log("未找到 main.py，请先选择或安装 ComfyUI。\n")
+            return
+        python = environment.resolve_python(
+            comfy, self.config.python_path_override, self.config.venv_manager
+        )
+        if str(python) == str(environment.sys.executable):
+            self.append_log("未检测到项目 .venv，跳过依赖检查并直接启动。\n")
+            self._launch_comfy()
+            return
+        self.append_log("正在检查 ComfyUI 与插件依赖是否满足...\n")
+        self._run_precheck(comfy, python)
+
+    def _run_precheck(self, comfy: Path, python) -> None:
+        # Run the (potentially slow) dependency check off the GUI thread; the
+        # worker only computes and emits a queued signal, so it never touches
+        # any QWidget directly.
+        import threading
+        from aura_rift.services.environment import check_dependencies
+
+        if self._precheck_worker is not None:
+            return
+
+        def worker() -> None:
+            try:
+                result = check_dependencies(comfy, python, timeout=25)
+            except Exception:
+                result = None  # GUI thread reports the failure + launches anyway
+            self.deps_checked.emit(result)
+
+        self._precheck_worker = threading.Thread(target=worker, daemon=True)
+        self._precheck_worker.start()
+
+    def _on_deps_checked(self, result) -> None:
+        self._precheck_worker = None
+        if result is None:
+            self.append_log("依赖检查未能完成，直接启动 ComfyUI。\n")
+            self._launch_comfy()
+            return
+        if result.ok:
+            self.append_log(result.summary() + "\n")
+            self._launch_comfy()
+            return
+        # Something missing: prompt the user.
+        self.append_log("依赖检查：" + result.summary() + "\n")
+        lines = []
+        for path, refs in result.missing_files.items():
+            title = path.parent.name if path.parent != self.comfy_dir() else "ComfyUI"
+            names = "，".join(r.name for r in refs[:6])
+            extra = f" 等 {len(refs)} 个" if len(refs) > 6 else ""
+            lines.append(f"  · {title}: {names}{extra}")
+        detail = "\n".join(lines)
+        box = QMessageBox(self)
+        box.setWindowTitle("依赖缺失")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"检测到 ComfyUI 启动所需依赖不满足。\n\n{detail}\n\n是否自动安装缺失依赖并启动？")
+        install_btn = box.addButton("安装并启动", QMessageBox.AcceptRole)
+        launch_btn = box.addButton("直接启动", QMessageBox.RejectRole)
+        cancel_btn = box.addButton("取消", QMessageBox.DestructiveRole)
+        box.setDefaultButton(install_btn)
+        box.exec()
+        choice = box.clickedButton()
+        if choice is install_btn:
+            self._install_missing_then_launch(list(result.missing_files.keys()))
+        elif choice is launch_btn:
+            self._launch_comfy()
+        # cancel-clicked: do nothing
+
+    def _install_missing_then_launch(self, files: list[Path]) -> None:
+        if not files:
+            self._launch_comfy()
+            return
+        self._pending_launch = True
+        commands = install_missing_deps_commands(self.comfy_dir(), files, self.config)
+        self.run_commands(commands, "安装缺失依赖")
+
+    def _launch_comfy(self) -> None:
         self.show_page("console")
         self.process.start(self.config)
 
@@ -2101,8 +2195,15 @@ class MainWindow(QMainWindow):
 
     def on_task_finished(self, ok: bool, message: str) -> None:
         self.append_log(f"\n== {'完成' if ok else '失败'}：{message} ==\n")
+        was_install_for_launch = self._pending_launch
+        self._pending_launch = False
         self.current_task = None
         self.refresh_pages()
+        if was_install_for_launch and ok:
+            self.append_log("依赖安装完成，自动启动 ComfyUI。\n")
+            self._launch_comfy()
+        elif was_install_for_launch and not ok:
+            self.append_log("依赖安装失败，已取消启动。\n")
 
     def run_git_action(self, action, title: str) -> None:
         comfy = self.comfy_dir()

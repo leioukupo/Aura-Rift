@@ -214,6 +214,68 @@ def reinstall_package_command(
     )
 
 
+def install_requirements_command(
+    comfy_path: Path,
+    requirements_file: Path,
+    config: "AppConfig | None" = None,
+    env: dict[str, str] | None = None,
+) -> CommandSpec:
+    """Build a single `pip install -r <file>` command for the configured venv manager."""
+    cfg = config or AppConfig()
+    env = env or command_environment(cfg)
+    manager = cfg.venv_manager or "venv"
+    mgr = VenvManager(manager) if manager else VenvManager.VENV
+    title = requirements_file.parent.name if requirements_file.parent.name and requirements_file.parent != comfy_path else "ComfyUI"
+    label = f"安装缺失依赖：{title}"
+
+    if mgr == VenvManager.CONDA:
+        env_name = conda_env_name(comfy_path) or comfy_path.name
+        return CommandSpec(
+            ["conda", "run", "-n", env_name, "pip", "install", "-r", str(requirements_file)],
+            cwd=comfy_path, env=env, title=label,
+        )
+    if mgr == VenvManager.POETRY:
+        return CommandSpec(
+            ["poetry", "run", "pip", "install", "-r", str(requirements_file)],
+            cwd=comfy_path, env=env, title=label,
+        )
+    if mgr == VenvManager.PDM:
+        return CommandSpec(
+            ["pdm", "run", "pip", "install", "-r", str(requirements_file)],
+            cwd=comfy_path, env=env, title=label,
+        )
+    if mgr == VenvManager.UV:
+        return CommandSpec(
+            ["uv", "pip", "install", "-r", str(requirements_file)],
+            cwd=comfy_path, env=env, title=label,
+        )
+
+    pip = comfy_path / ".venv" / "bin" / "pip"
+    if not pip.exists():
+        pip = Path("pip")
+    return CommandSpec(
+        [str(pip), "install", "-r", str(requirements_file)],
+        cwd=comfy_path, env=env, title=label,
+    )
+
+
+def install_missing_deps_commands(
+    comfy_path: Path,
+    files: list[Path],
+    config: "AppConfig | None" = None,
+    env: dict[str, str] | None = None,
+) -> list[CommandSpec]:
+    """One pip install -r command per missing requirements file."""
+    if not files:
+        return []
+    cfg = config or AppConfig()
+    env = env or command_environment(cfg)
+    return [
+        install_requirements_command(comfy_path, f, cfg, env)
+        for f in files
+    ]
+
+
 def install_plugin_command(
     comfy_path: Path,
     url: str,

@@ -274,3 +274,196 @@ def dependency_status(
         "环境管理器": venv_manager_status(comfy_path, mgr),
     }
 
+
+
+@dataclass
+class RequirementRef:
+    """A single requirement line that the check considers missing/unmet."""
+    name: str
+    line: str
+    specifier: str = ""
+
+
+@dataclass
+class DependencyCheck:
+    """Result of pre-launch dependency verification.
+
+    `missing_files` maps each requirements file with at least one missing
+    package to the list of addresses missing in that file. Files without any
+    missing items are not present so callers can install just what's needed.
+    """
+    all_files: list[Path] = field(default_factory=list)
+    missing_files: dict[Path, list[RequirementRef]] = field(default_factory=dict)
+    installed_count: int = 0
+    total_count: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return not self.missing_files
+
+    @property
+    def total_missing(self) -> int:
+        return sum(len(v) for v in self.missing_files.values())
+
+    def summary(self) -> str:
+        if self.ok:
+            return f"依赖检查通过：共 {self.total_count} 个依赖，已全部安装。"
+        names = "，".join(str(k.parent.name or k.name) for k in self.missing_files)
+        return f"发现 {self.total_missing} 个未满足的依赖，分布在 {len(self.missing_files)} 个文件：{names}"
+
+
+def iter_requirements_files(comfy_path: Path) -> list[Path]:
+    """Collect ComfyUI's own requirements.txt and every custom_nodes one."""
+    files: list[Path] = []
+    main = comfy_path / "requirements.txt"
+    if main.exists():
+        files.append(main)
+    custom_nodes = comfy_path / "custom_nodes"
+    if custom_nodes.is_dir():
+        for child in sorted(custom_nodes.iterdir(), key=lambda p: p.name.lower()):
+            if child.is_dir():
+                req = child / "requirements.txt"
+                if req.exists():
+                    files.append(req)
+    return files
+
+
+# Python script run inside the comfy venv to verify requirement satisfaction.
+# Kept dependency-light: prefers `packaging` for strict specifier matching and
+# falls back to name-only presence checking when it's not installed.
+_CHECK_SCRIPT = r'''
+import json, sys, re
+try:
+    from packaging.requirements import Requirement
+    try:
+        from packaging.specifiers import SpecifierSet
+    except Exception:
+        SpecifierSet = None
+except Exception:
+    Requirement = None
+    SpecifierSet = None
+import importlib.metadata as md
+
+def _norm(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+try:
+    dists = {md.distribution(_).metadata.get("Name", "") for _ in md.distributions()}
+    installed = {_norm(_): _ for _ in dists if _}
+    versions = {}
+    for dist in md.distributions():
+        n = dist.metadata.get("Name", "")
+        if n:
+            installed[_norm(n)] = n
+            try:
+                versions[_norm(n)] = md.version(n)
+            except Exception:
+                pass
+except Exception:
+    installed = {}
+    versions = {}
+
+def parse_line(line):
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return None
+    if s.startswith("-"):
+        return None  # pip flag
+    if "://" in s and "@" in s:
+        return None  # vcs url
+    if s.startswith("git+") or s.startswith("hg+") or s.startswith("svn+"):
+        return None
+    if Requirement is not None:
+        try:
+            req = Requirement(s)
+            name = req.name
+            spec = str(req.specifier) if req.specifier else ""
+            return _norm(name), name, spec
+        except Exception:
+            pass
+    m = re.match(r"^([A-Za-z0-9_.-]+)(\[[^\]]+\])?(.*)$", s)
+    if m:
+        name = m.group(1)
+        rest = m.group(3).strip()
+        marker = ""
+        if ";" in rest:
+            rest, _, marker = rest.partition(";")
+        return _norm(name), name, rest.strip()
+    return None
+
+def satisfies(version, spec):
+    if not spec or SpecifierSet is None or version is None:
+        return True
+    try:
+        return SpecifierSet(spec).contains(version)
+    except Exception:
+        return True
+
+results = []
+for path in sys.argv[1:]:
+    file_result = {"file": path, "missing": [], "ok": []}
+    try:
+        raw = open(path, encoding="utf-8", errors="replace").read()
+    except Exception as e:
+        file_result["error"] = str(e)
+        results.append(file_result)
+        continue
+    for line in raw.splitlines():
+        p = parse_line(line)
+        if p is None:
+            continue
+        norm, name, spec = p
+        inst_version = versions.get(norm)
+        if norm in installed and satisfies(inst_version, spec):
+            file_result["ok"].append({"name": name, "line": line, "specifier": spec})
+        else:
+            file_result["missing"].append({"name": name, "line": line, "specifier": spec, "installed_version": inst_version or ""})
+    results.append(file_result)
+print(json.dumps({"results": results}, ensure_ascii=False))
+'''
+
+
+def check_dependencies(
+    comfy_path: Path,
+    python: Path | str,
+    timeout: int = 25,
+) -> DependencyCheck:
+    """Verify ComfyUI + custom_nodes requirements against the installed venv.
+
+    Returns a structured result; never raises — failures degrade to "no check"
+    so launching is never blocked by the precheck itself.
+    """
+    files = iter_requirements_files(comfy_path)
+    check = DependencyCheck(all_files=files)
+    if not files:
+        return check
+    try:
+        proc = subprocess.run(
+            [str(python), "-c", _CHECK_SCRIPT, *[str(f) for f in files]],
+            cwd=str(comfy_path),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        data = json.loads(proc.stdout.strip() or "{}")
+    except Exception as exc:  # noqa: BLE001 - never block launch on a check failure
+        check.installed_count = -1
+        check.missing_files = {}
+        return check
+    for entry in data.get("results", []):
+        path = Path(entry["file"])
+        present = 0
+        missing: list[RequirementRef] = []
+        for item in entry.get("missing", []):
+            missing.append(RequirementRef(
+                name=item.get("name", ""),
+                line=item.get("line", ""),
+                specifier=item.get("specifier", ""),
+            ))
+        present = len(entry.get("ok", []))
+        check.total_count += missing.__len__() + present
+        check.installed_count += present
+        if missing:
+            check.missing_files[path] = missing
+    return check
