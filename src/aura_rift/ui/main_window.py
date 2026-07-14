@@ -1911,7 +1911,15 @@ class SettingsPage(QWidget):
 
     def save_env(self) -> None:
         self.window.config.comfy_path = self.project_path.text().strip() or str(default_comfy_dir())
-        self.window.config.python_path_override = self.python_override.text().strip()
+        py_override = self.python_override.text().strip()
+        if py_override and not str(environment._resolve_override(py_override)):
+            QMessageBox.warning(
+                self, "Python 路径无效",
+                "所选路径不是有效的 Python 解释器（未通过 --version 检查）。\n"
+                "该覆盖已被忽略，将自动检测项目 .venv 或系统 Python。",
+            )
+            py_override = ""
+        self.window.config.python_path_override = py_override
         self.window.config.venv_manager = self.venv_manager_combo.currentData()
         self.window.save_config()
         self.window.refresh_pages()

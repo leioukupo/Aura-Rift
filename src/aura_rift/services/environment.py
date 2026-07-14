@@ -134,6 +134,44 @@ def venv_python(comfy_path: Path) -> Path:
     return venv_dir(comfy_path) / "bin" / "python"
 
 
+def _is_python_interpreter(path: Path | str) -> bool:
+    """True if *path* can execute ``--version`` and reports Python."""
+    try:
+        proc = subprocess.run(
+            [str(path), "--version"],
+            text=True,
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+        return proc.returncode == 0 and "Python" in (proc.stdout + proc.stderr)
+    except Exception:
+        return False
+
+
+def _resolve_override(override: str) -> Path | str:
+    """Interpret a user-supplied python override.
+
+    Accepts a direct interpreter path or a venv directory; rejects anything
+    that isn't a real Python binary (e.g. pip, pip3) so a stray selection
+    never gets passed to QProcess.start.
+    """
+    p = Path(override).expanduser()
+    if p.is_dir():
+        if os.name == "nt":
+            candidate = p / "Scripts" / "python.exe"
+        else:
+            candidate = p / "bin" / "python"
+            if not candidate.exists():
+                candidate = p / "bin" / "python3"
+        if _is_python_interpreter(candidate):
+            return candidate
+        return ""
+    if p.is_file() and _is_python_interpreter(p):
+        return p
+    return ""
+
+
 def venv_pip(comfy_path: Path) -> Path:
     if os.name == "nt":
         return venv_dir(comfy_path) / "Scripts" / "pip.exe"
@@ -146,7 +184,10 @@ def resolve_python(
     manager: "VenvManager | str" = VenvManager.VENV,
 ) -> Path | str:
     if override:
-        return override
+        resolved = _resolve_override(override)
+        if str(resolved):
+            return resolved
+        # invalid override — fall through to discovery below
     if isinstance(manager, str):
         manager = VenvManager(manager)
     if manager == VenvManager.CONDA:
