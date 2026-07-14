@@ -43,6 +43,12 @@ class CommandWorker(QObject):
                 self.output.emit(f"$ {' '.join(command.args)}\n")
                 env = os.environ.copy()
                 env.update(command.env)
+                # Don't let the launcher's own virtualenv leak into spawned
+                # processes: uv/pip/conda all discover their target environment
+                # via VIRTUAL_ENV, so an inherited value pointing to Aura-Rift's
+                # .venv would cause packages to install into the wrong place.
+                env.pop("VIRTUAL_ENV", None)
+                env.pop("PYTHONHOME", None)
                 self._process = subprocess.Popen(
                     command.args,
                     cwd=str(command.cwd) if command.cwd else None,
@@ -93,4 +99,3 @@ class TaskHandle(QObject):
         self.thread.quit()
         self.thread.wait()
         self.finished.emit(ok, message)
-

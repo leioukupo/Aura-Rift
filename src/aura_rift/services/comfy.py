@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, Signal
 
 from aura_rift.config import AppConfig, COMFY_REPO_URL, MANAGER_REPO_URL
-from aura_rift.services.environment import VenvManager, conda_env_name, resolve_python
+from aura_rift.services.environment import VenvManager, conda_env_name, resolve_python, venv_python
 from aura_rift.services.tasks import CommandSpec
 
 
@@ -41,6 +41,9 @@ class ComfyProcess(QObject):
         env = QProcessEnvironment.systemEnvironment()
         for key, value in config.network.environment().items():
             env.insert(key, value)
+        # Don't let the launcher's own virtualenv leak into ComfyUI's process.
+        env.remove("VIRTUAL_ENV")
+        env.remove("PYTHONHOME")
         self.process.setProcessEnvironment(env)
         self.process.setWorkingDirectory(str(comfy_path))
         self.output.emit(f"$ {python} {' '.join(args)}\n")
@@ -110,11 +113,13 @@ def _create_env_commands(target: Path, manager: str, env: dict[str, str]) -> lis
         ]
         uv_lock = target / "uv.lock"
         if uv_lock.exists():
-            commands.append(CommandSpec(["uv", "sync"], cwd=target, env=env, title="uv sync"))
+            commands.append(CommandSpec(
+                ["uv", "sync", "--python", str(venv_python(target))],
+                cwd=target, env=env, title="uv sync"))
         elif requirements.exists():
-            commands.append(
-                CommandSpec(["uv", "pip", "install", "-r", "requirements.txt"], cwd=target, env=env, title="安装 ComfyUI 依赖")
-            )
+            commands.append(CommandSpec(
+                ["uv", "pip", "install", "--python", str(venv_python(target)), "-r", "requirements.txt"],
+                cwd=target, env=env, title="安装 ComfyUI 依赖"))
         return commands
     if mgr == VenvManager.CONDA:
         env_file = target / "environment.yml"
@@ -245,10 +250,13 @@ def install_requirements_command(
             cwd=comfy_path, env=env, title=label,
         )
     if mgr == VenvManager.UV:
-        return CommandSpec(
-            ["uv", "pip", "install", "-r", str(requirements_file)],
-            cwd=comfy_path, env=env, title=label,
-        )
+        # Explicitly target the ComfyUI venv's interpreter so uv never
+        # resolves to the launcher's own venv via VIRTUAL_ENV or parent-crawl.
+        python = resolve_python(comfy_path, cfg.python_path_override, cfg.venv_manager)
+        cmd = ["uv", "pip", "install", "-r", str(requirements_file)]
+        if str(python) and Path(str(python)).exists():
+            cmd[3:3] = ["--python", str(python)]
+        return CommandSpec(cmd, cwd=comfy_path, env=env, title=label)
 
     pip = comfy_path / ".venv" / "bin" / "pip"
     if not pip.exists():
