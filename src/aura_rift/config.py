@@ -333,11 +333,23 @@ class FullOptions:
         return args
 
 
+# (label, index_url) — empty URL means official PyPI (no override).
+PYPI_MIRRORS: list[tuple[str, str]] = [
+    ("PyPI 官方源", ""),
+    ("清华大学", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+    ("中科大", "https://pypi.mirrors.ustc.edu.cn/simple"),
+    ("阿里云", "https://mirrors.aliyun.com/pypi/simple"),
+    ("南京大学", "https://mirror.nju.edu.cn/pypi/web/simple"),
+    ("腾讯云", "https://mirrors.cloud.tencent.com/pypi/simple"),
+    ("华为云", "https://mirrors.huaweicloud.com/repository/pypi/simple"),
+]
+
+
 @dataclass
 class NetworkOptions:
     http_proxy: str = ""
     https_proxy: str = ""
-    pypi_mirror: bool = False
+    pypi_mirror: str = ""
     github_proxy: str = ""
 
     def environment(self) -> dict[str, str]:
@@ -372,7 +384,12 @@ class AppConfig:
         if isinstance(data.get("launch"), dict):
             cfg.launch = LaunchOptions(**{**asdict(cfg.launch), **data["launch"]})
         if isinstance(data.get("network"), dict):
-            cfg.network = NetworkOptions(**{**asdict(cfg.network), **data["network"]})
+            net = {**asdict(cfg.network), **data["network"]}
+            # Migrate old bool pypi_mirror to the new string (URL) format.
+            pm = net.get("pypi_mirror")
+            if isinstance(pm, bool):
+                net["pypi_mirror"] = "https://pypi.tuna.tsinghua.edu.cn/simple" if pm else ""
+            cfg.network = NetworkOptions(**net)
         if isinstance(data.get("full"), dict):
             cfg.full = FullOptions(**{**asdict(cfg.full), **data["full"]})
         return cfg

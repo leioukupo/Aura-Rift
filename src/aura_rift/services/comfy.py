@@ -304,8 +304,8 @@ def install_plugin_command(
 def command_environment(config: AppConfig) -> dict[str, str]:
     env = config.network.environment()
     if config.network.pypi_mirror:
-        env["PIP_INDEX_URL"] = "https://pypi.tuna.tsinghua.edu.cn/simple"
-        env["UV_INDEX_URL"] = "https://pypi.tuna.tsinghua.edu.cn/simple"
+        env["PIP_INDEX_URL"] = config.network.pypi_mirror
+        env["UV_INDEX_URL"] = config.network.pypi_mirror
     github_proxy = config.network.github_proxy.strip()
     if github_proxy:
         env["GITHUB_PROXY"] = github_proxy

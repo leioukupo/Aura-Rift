@@ -48,6 +48,7 @@ from aura_rift.config import (
     ConfigStore,
     bundled_markdown,
     default_comfy_dir,
+    PYPI_MIRRORS,
 )
 from aura_rift.i18n import Translator
 from aura_rift.services import environment
@@ -1827,8 +1828,11 @@ class SettingsPage(QWidget):
 
         self.http_proxy = QLineEdit(self.window.config.network.http_proxy)
         self.https_proxy = QLineEdit(self.window.config.network.https_proxy)
-        self.pypi_mirror = QCheckBox("使用 PyPI 国内镜像")
-        self.pypi_mirror.setChecked(self.window.config.network.pypi_mirror)
+        self.pypi_mirror = QComboBox()
+        for name, url in PYPI_MIRRORS:
+            self.pypi_mirror.addItem(name, url)
+        idx = self.pypi_mirror.findData(self.window.config.network.pypi_mirror)
+        self.pypi_mirror.setCurrentIndex(idx if idx >= 0 else 0)
         self.github_proxy_edit = QLineEdit(self.window.config.network.github_proxy)
         self.github_proxy_edit.setPlaceholderText("GitHub 镜像前缀，例如 https://gh-proxy.com/")
         proxy_card = card()
@@ -1839,7 +1843,8 @@ class SettingsPage(QWidget):
         proxy_layout.addWidget(self.http_proxy, 1, 1)
         proxy_layout.addWidget(label("HTTPS_PROXY"), 2, 0)
         proxy_layout.addWidget(self.https_proxy, 2, 1)
-        proxy_layout.addWidget(self.pypi_mirror, 3, 0, 1, 2)
+        proxy_layout.addWidget(label("PyPI 镜像源"), 3, 0)
+        proxy_layout.addWidget(self.pypi_mirror, 3, 1)
         proxy_layout.addWidget(label("GitHub 镜像前缀"), 4, 0)
         proxy_layout.addWidget(self.github_proxy_edit, 4, 1)
         root.addWidget(proxy_card)
@@ -1928,7 +1933,7 @@ class SettingsPage(QWidget):
     def save_proxy(self) -> None:
         self.window.config.network.http_proxy = self.http_proxy.text().strip()
         self.window.config.network.https_proxy = self.https_proxy.text().strip()
-        self.window.config.network.pypi_mirror = self.pypi_mirror.isChecked()
+        self.window.config.network.pypi_mirror = self.pypi_mirror.currentData()
         self.window.config.network.github_proxy = self.github_proxy_edit.text().strip()
         self.window.save_config()
         QMessageBox.information(self, "已保存", "代理设置已保存。")
