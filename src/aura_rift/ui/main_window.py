@@ -2088,11 +2088,12 @@ class MainWindow(QMainWindow):
     def start_comfy(self) -> None:
         """Begin the launch flow: precheck dependencies, then launch.
 
-        The precheck only makes sense against the interpreter ComfyUI will
-        actually run on. resolve_python falls back to the launcher's own
-        interpreter when no .venv / python override / conda env is available,
-        so in that case we skip the check rather than reporting noise against an
-        interpreter the user has no intention of running ComfyUI in.
+        resolve_python returns the interpreter ComfyUI will actually run on:
+        a configured override, a conda env, a project .venv, or — as a last
+        resort — the launcher's own sys.executable. The dependency check is
+        always run against that interpreter; the only exception is a frozen
+        (PyInstaller-packaged) build where sys.executable is the binary
+        itself and cannot execute -c scripts.
         """
         self.config_store.save(self.config)
         self.show_page("console")
@@ -2103,8 +2104,10 @@ class MainWindow(QMainWindow):
         python = environment.resolve_python(
             comfy, self.config.python_path_override, self.config.venv_manager
         )
-        if str(python) == str(environment.sys.executable):
-            self.append_log("未检测到项目 .venv，跳过依赖检查并直接启动。\n")
+        if str(python) == str(environment.sys.executable) and getattr(
+            environment.sys, "frozen", False
+        ):
+            self.append_log("未检测到 ComfyUI 专属 Python 环境，跳过依赖检查并直接启动。\n")
             self._launch_comfy()
             return
         self.append_log("正在检查 ComfyUI 与插件依赖是否满足...\n")
