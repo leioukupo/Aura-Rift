@@ -127,7 +127,7 @@ QPlainTextEdit#console {
     color: #d6e2d0;
     border: 0;
     border-top: 1px solid #23263a;
-    font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "Consolas", "Noto Color Emoji", "Noto Sans Mono CJK SC", monospace;
 }
 QPushButton {
     background: #2b2f3a;
@@ -474,7 +474,7 @@ QPlainTextEdit#console {
     color: #d6e2d0;
     border: 0;
     border-top: 1px solid #e3e6ec;
-    font-family: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+    font-family: "JetBrains Mono", "Cascadia Code", "Consolas", "Noto Color Emoji", "Noto Sans Mono CJK SC", monospace;
 }
 QPushButton {
     background: #ffffff;

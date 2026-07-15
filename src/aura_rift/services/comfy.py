@@ -30,10 +30,10 @@ class ComfyProcess(QObject):
         comfy_path = Path(config.comfy_path).expanduser()
         main_py = comfy_path / "main.py"
         if self.is_running():
-            self.output.emit("ComfyUI 已在运行。\n")
+            self.output.emit("\033[33mComfyUI 已在运行。\033[0m\n")
             return
         if not main_py.exists():
-            self.output.emit("未找到 main.py，请先选择或安装 ComfyUI。\n")
+            self.output.emit("\033[1;31m未找到 main.py，请先选择或安装 ComfyUI。\033[0m\n")
             self.state_changed.emit("路径错误")
             return
         python = str(resolve_python(comfy_path, config.python_path_override, config.venv_manager))
@@ -46,12 +46,12 @@ class ComfyProcess(QObject):
         env.remove("PYTHONHOME")
         self.process.setProcessEnvironment(env)
         self.process.setWorkingDirectory(str(comfy_path))
-        self.output.emit(f"$ {python} {' '.join(args)}\n")
+        self.output.emit(f"\033[2m$ {python} {' '.join(args)}\033[0m\n")
         self.process.start(python, args)
 
     def stop(self) -> None:
         if not self.is_running():
-            self.output.emit("当前没有运行中的 ComfyUI 进程。\n")
+            self.output.emit("\033[33m当前没有运行中的 ComfyUI 进程。\033[0m\n")
             return
         self.process.terminate()
         if not self.process.waitForFinished(3000):
@@ -66,7 +66,10 @@ class ComfyProcess(QObject):
     def _finished(self, code: int, _status: QProcess.ExitStatus) -> None:
         self.state_changed.emit("未运行")
         self.finished.emit(code)
-        self.output.emit(f"\n进程已退出，退出码：{code}\n")
+        if code == 0:
+            self.output.emit("\033[2m\n进程已正常退出。\033[0m\n")
+        else:
+            self.output.emit(f"\033[1;31m\n进程已退出，退出码：{code}\033[0m\n")
 
 
 def _github_url(url: str, config: AppConfig) -> str:

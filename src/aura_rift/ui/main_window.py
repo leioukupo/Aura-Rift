@@ -4,7 +4,7 @@ import shlex
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSize, Qt, Signal, QUrl
-from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCursor
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -98,47 +98,100 @@ def make_lightbulb_icon(color: str) -> QIcon:
 import re
 import unicodedata
 
-# Common ANSI escape sequences emitted by tools (color, cursor moves, clears).
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
-# Other control characters that don't render as glyphs (keep \n / \t).
+# --- Console rendering: ANSI color parsing + emoji support -------------------
+# Aura-Rift streams ComfyUI / git / pip subprocess output into a read-only
+# console.  ComfyUI colours its own logs with ANSI SGR codes (see
+# ComfyUI/app/logger.py: INFO green, DEBUG cyan, WARNING yellow+bold, ERROR
+# red+bold).  Instead of stripping those (as the old plain-text console did)
+# we parse them here into QTextCharFormat runs so the launcher shows the same
+# colour as a terminal.  Emoji / arrow / box glyphs are kept and rendered via
+# Qt font fallback, dropping to ASCII labels only when no emoji font exists.
+
+# Fully-formed escape sequences emitted by subprocesses.
+#  - OSC (title/clipboard), terminated by BEL or ST (\x1b \)
+#  - CSI (SGR colour, cursor moves, clears), final byte 0x40-0x7e
+_ALL_ESC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]")
+# A trailing, possibly incomplete CSI (`\x1b[1;3` with no final byte yet) that
+# may arrive split across two ready-read chunks; buffered until the rest comes.
+_INCOMPLETE_ESC_RE = re.compile(r"\x1b\[?[0-9;?]*$")
+# Other non-rendering control characters (keep \n and \t).  Also strips a lone
+# ESC that never formed a complete sequence.
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
-# A curated map of common emojis to short ASCII labels, used only as a fallback
-# when no emoji-capable font is installed (so the console never shows tofu boxes).
+# Curated emoji -> ASCII labels, used *only* as a fallback when no emoji-capable
+# font is registered (so the console never shows tofu / missing-glyph boxes).
 _EMOJI_MAP = {
     "\U0001f525": "[fire] ",
     "\U0001f4a1": "[tip] ",
     "\u2714": "[ok] ",
+    "\u2705": "[ok] ",
     "\u2716": "[x] ",
+    "\u274c": "[x] ",
     "\u26a0": "[warn] ",
+    "\u26a0\ufe0f": "[warn] ",
+    "\U0001f680": "[go]  ",
+    "\U0001f6a8": "[!]   ",
 }
 
 
 def _emoji_font_available() -> bool:
     """True when a font capable of rendering emoji glyphs is registered with Qt."""
-    from PySide6.QtGui import QFontDatabase
+    from PySide6.QtGui import QFontDatabase  # local import: heavy symbol table
     for fam in QFontDatabase.families():
         if "emoji" in fam.lower():
             return True
     return False
 
 
-# Detected on first call, then cached. Refreshed lazily so apps that install
-# fonts before the first window opens still pick them up.
+# Detected on first append, then cached for the window's lifetime.
 _EMOJI_AVAILABLE: bool | None = None
 
 
-def _normalize_log(text: str) -> str:
-    """Clean subprocess output for display in the monospace console.
+# Default console text colour — matches QPlainTextEdit#console in both themes.
+_CONSOLE_DEFAULT_FG = "#d6e2d0"
 
-    Always strips ANSI escapes and stray control characters (the console renders
-    plain text, so color codes would only show as escape noise) and collapses
-    carriage-return progress lines to their final segment.
+# 16-colour ANSI palette tuned for the near-black console background (#0c0d11).
+# Index 0 (black) is mapped to a visible gray so it never vanishes into the bg.
+_ANSI_PALETTE = [
+    QColor("#5b6472"),  # 0  black
+    QColor("#ef6b6b"),  # 1  red
+    QColor("#7ee787"),  # 2  green
+    QColor("#f5d76b"),  # 3  yellow
+    QColor("#6cb6ff"),  # 4  blue
+    QColor("#d699ff"),  # 5  magenta
+    QColor("#56d4dd"),  # 6  cyan
+    QColor("#e6e8ee"),  # 7  white
+    QColor("#9ca3af"),  # 8  bright black
+    QColor("#ff8a80"),  # 9  bright red
+    QColor("#a3f7a3"),  # 10 bright green
+    QColor("#ffe066"),  # 11 bright yellow
+    QColor("#9cc8ff"),  # 12 bright blue
+    QColor("#e8b6ff"),  # 13 bright magenta
+    QColor("#8ae8f0"),  # 14 bright cyan
+    QColor("#ffffff"),  # 15 bright white
+]
 
-    Emoji / arrow / box-drawing glyphs are left untouched when an
-    emoji-capable font is installed; otherwise they fall back to ASCII or short
-    text labels so nothing renders as a missing-glyph box.
-    """
+
+def _ansi_256(n: int) -> QColor:
+    """Map an xterm 256-colour index to a QColor."""
+    if 0 <= n < 16:
+        return QColor(_ANSI_PALETTE[n])
+    if 16 <= n < 232:
+        k = n - 16
+        ch = (k // 36, (k // 6) % 6, k % 6)
+
+        def level(v: int) -> int:
+            return 0 if v == 0 else 55 + 40 * v
+
+        return QColor(level(ch[0]), level(ch[1]), level(ch[2]))
+    if 232 <= n < 256:  # grayscale ramp
+        v = 8 + (n - 232) * 10
+        return QColor(v, v, v)
+    return QColor(_ANSI_PALETTE[7])
+
+
+def _normalize_emoji(text: str) -> str:
+    """Keep emoji only when a capable font exists; else degrade to ASCII."""
     global _EMOJI_AVAILABLE
     if not text:
         return text
@@ -146,38 +199,204 @@ def _normalize_log(text: str) -> str:
         _EMOJI_AVAILABLE = _emoji_font_available()
     emoji_ok = _EMOJI_AVAILABLE
 
-    text = _ANSI_RE.sub("", text)
-    text = _CTRL_RE.sub("", text)
-    cleaned_lines = []
-    for line in text.split("\n"):
-        last = line.rsplit("\r", 1)[-1] if "\r" in line else line
-        if not emoji_ok:
-            last = re.sub(r"[\ue000-\uf8ff]", "-", last)
-            last = (
-                last.replace("\u2192", "->")
-                    .replace("\u2190", "<-")
-                    .replace("\u25b8", ">")
-                    .replace("\u25c2", "<")
-                    .replace("\u25b6", ">")
-                    .replace("\u25c0", "<]")
-            )
-        cleaned_lines.append(last)
-    text = "\n".join(cleaned_lines)
-
-    if emoji_ok:
-        return text
-
+    if _EMOJI_AVAILABLE is None:
+        _EMOJI_AVAILABLE = _emoji_font_available()
+    if _EMOJI_AVAILABLE:
+        return text  # Qt font fallback renders the glyphs
+    text = re.sub(r"[\ue000-\uf8ff]", "-", text)
+    text = (
+        text.replace("\u2192", "->")
+            .replace("\u2190", "<-")
+            .replace("\u25b8", ">")
+            .replace("\u25c2", "<")
+            .replace("\u25b6", ">")
+            .replace("\u25c0", "<]")
+    )
     for emoji, label in _EMOJI_MAP.items():
         text = text.replace(emoji, label)
     out = []
     for ch in text:
         cp = ord(ch)
         cat = unicodedata.category(ch)
-        if cat == "So" or cp >= 0x1F000 or (0xE000 <= cp <= 0xF8FF):
+        if cat == "So" or cp >= 0x1F000 or 0xE000 <= cp <= 0xF8FF:
             out.append("?")
         else:
             out.append(ch)
     return "".join(out)
+
+
+class AnsiConsoleParser:
+    """Streaming ANSI-to-QTextCharFormat renderer for the console widget.
+
+    ``feed`` is called repeatedly with raw chunks from the subprocess and keeps
+    the running SGR state across calls (so a colour code split between two
+    chunks is still applied) plus a small buffer for a trailing, incomplete CSI
+    escape.  Carriage-return progress lines are collapsed to their final
+    segment; emoji glyphs are kept and rely on Qt font fallback, degrading to
+    ASCII labels only when no emoji font is registered.
+    """
+
+    def __init__(self, default_fg: str = _CONSOLE_DEFAULT_FG) -> None:
+        self._default_fg = QColor(default_fg)
+        self._pending = ""
+        self._fg = self._default_fg
+        self._bg: QColor | None = None
+        self._bold = False
+        self._italic = False
+        self._underline = False
+        self._fmt = self._build_format()
+
+    def _build_format(self) -> QTextCharFormat:
+        fmt = QTextCharFormat()
+        fmt.setFontWeight(QFont.Bold if self._bold else QFont.Normal)
+        fmt.setFontItalic(self._italic)
+        fmt.setFontUnderline(self._underline)
+        fmt.setForeground(QBrush(self._fg))
+        if self._bg is not None:
+            fmt.setBackground(QBrush(self._bg))
+        return fmt
+
+    def reset(self) -> None:
+        """Drop buffered/buffered state so each run starts from default colour."""
+        self._pending = ""
+        self._fg = self._default_fg
+        self._bg = None
+        self._bold = self._italic = self._underline = False
+        self._fmt = self._build_format()
+
+    @staticmethod
+    def _collapse_cr(text: str) -> str:
+        return "\n".join(
+            line.rsplit("\r", 1)[-1] if "\r" in line else line
+            for line in text.split("\n")
+        )
+
+    def _emit_plain(self, cursor: QTextCursor, raw: str) -> None:
+        if not raw:
+            return
+        plain = _CTRL_RE.sub("", raw)
+        plain = _normalize_emoji(plain)
+        if plain:
+            cursor.insertText(plain, self._fmt)
+
+    def feed(self, text: str, widget: QPlainTextEdit) -> None:
+        if not text:
+            return
+        text = self._pending + text
+        self._pending = ""
+        hold = _INCOMPLETE_ESC_RE.search(text)  # partial CSI at the tail
+        if hold:
+            self._pending = text[hold.start():]
+            text = text[: hold.start()]
+        if not text:
+            return
+        text = self._collapse_cr(text)
+        cursor = widget.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        pos = 0
+        for match in _ALL_ESC_RE.finditer(text):
+            self._emit_plain(cursor, text[pos: match.start()])
+            seq = match.group(0)
+            if not seq.startswith("\x1b]"):  # OSC is dropped; CSI SGR applied
+                self._apply_sgr(seq)
+            pos = match.end()
+        self._emit_plain(cursor, text[pos:])
+
+    def _apply_sgr(self, seq: str) -> None:
+        """Mutate the running colour/style state from one CSI sequence."""
+        if not seq.endswith("m"):
+            return  # cursor moves / clears are not rendered here
+        body = seq[2:-1]  # strip "\x1b[" and "m"
+        if not body:
+            self._fg = self._default_fg
+            self._bg = None
+            self._bold = self._italic = self._underline = False
+            self._fmt = self._build_format()
+            return
+        try:
+            codes = [int(c) if c != "" else 0 for c in body.split(";")]
+        except ValueError:
+            return
+        i = 0
+        n = len(codes)
+        changed = False
+        while i < n:
+            c = codes[i]
+            if c == 0:
+                self._fg = self._default_fg
+                self._bg = None
+                self._bold = self._italic = self._underline = False
+                changed = True
+            elif c == 1:
+                self._bold = True
+                changed = True
+            elif c in (2,):
+                pass  # faint: not rendered
+            elif c == 3:
+                self._italic = True
+                changed = True
+            elif c == 4:
+                self._underline = True
+                changed = True
+            elif c == 22:
+                self._bold = False
+                changed = True
+            elif c == 23:
+                self._italic = False
+                changed = True
+            elif c == 24:
+                self._underline = False
+                changed = True
+            elif c == 39:
+                self._fg = self._default_fg
+                changed = True
+            elif c == 49:
+                self._bg = None
+                changed = True
+            elif 30 <= c <= 37:
+                self._fg = QColor(_ANSI_PALETTE[c - 30])
+                changed = True
+            elif 40 <= c <= 47:
+                self._bg = QColor(_ANSI_PALETTE[c - 40])
+                changed = True
+            elif 90 <= c <= 97:
+                self._fg = QColor(_ANSI_PALETTE[c - 90 + 8])
+                changed = True
+            elif 100 <= c <= 107:
+                self._bg = QColor(_ANSI_PALETTE[c - 100 + 8])
+                changed = True
+            elif c in (38, 48):
+                color, i = self._parse_extended(codes, i + 1)
+                if color is not None:
+                    if c == 38:
+                        self._fg = color
+                    else:
+                        self._bg = color
+                    changed = True
+                continue  # _parse_extended already advanced i
+            # other codes (blink, conceal, reverse, cursor) are ignored
+            i += 1
+        if changed:
+            self._fmt = self._build_format()
+
+    @staticmethod
+    def _parse_extended(codes: list[int], i: int) -> tuple[QColor | None, int]:
+        """Parse a `5;n` or `2;r;g;b` extended-colour payload at index *i*."""
+        if i >= len(codes):
+            return None, len(codes)
+        mode = codes[i]
+        if mode == 5:
+            if i + 1 < len(codes):
+                return _ansi_256(codes[i + 1]), i + 2
+            return None, len(codes)
+        if mode == 2:
+            if i + 3 < len(codes):
+                return (
+                    QColor(codes[i + 1] & 0xFF, codes[i + 2] & 0xFF, codes[i + 3] & 0xFF),
+                    i + 4,
+                )
+            return None, len(codes)
+        return None, min(i + 1, len(codes))  # legacy/unknown form: skip one
 
 
 def hline() -> QFrame:
@@ -289,17 +508,27 @@ class ConsolePage(QWidget):
         self.output = QPlainTextEdit()
         self.output.setObjectName("console")
         self.output.setReadOnly(True)
+        # Monospace with emoji + CJK fallback so glyphs like fire / ok / arrows
+        # render instead of tofu even though no single font covers everything.
+        console_font = QFont()
+        console_font.setStyleHint(QFont.Monospace)
+        console_font.setFamilies([
+            "JetBrains Mono", "Cascadia Code", "Consolas", "Menlo",
+            "Noto Color Emoji", "Noto Sans Mono CJK SC",
+            "Microsoft YaHei", "monospace",
+        ])
+        self.output.setFont(console_font)
+        self.parser = AnsiConsoleParser()
         layout.addWidget(self.output, 1)
 
     def append(self, text: str) -> None:
-        text = _normalize_log(text)
-        self.output.moveCursor(QTextCursor.End)
-        self.output.insertPlainText(text)
+        self.parser.feed(text, self.output)
         self.output.moveCursor(QTextCursor.End)
 
     def clear_output(self) -> None:
         """Clear the console so each new run starts from a fresh log."""
         self.output.clear()
+        self.parser.reset()
 
     def set_status(self, status: str) -> None:
         running = ("运行" in status) and ("未" not in status)
@@ -2156,8 +2385,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "console_page"):
             self.console_page.clear_output()
         comfy = self.comfy_dir()
+        self.append_log("\n\033[1;36mAura-Rift\033[0m  \033[2m准备启动 ComfyUI\033[0m\n")
         if not (comfy / "main.py").exists():
-            self.append_log("未找到 main.py，请先选择或安装 ComfyUI。\n")
+            self.append_log("\033[1;31m未找到 main.py，请先选择或安装 ComfyUI。\033[0m\n")
             return
         python = environment.resolve_python(
             comfy, self.config.python_path_override, self.config.venv_manager
@@ -2168,7 +2398,7 @@ class MainWindow(QMainWindow):
             self.append_log("未检测到 ComfyUI 专属 Python 环境，跳过依赖检查并直接启动。\n")
             self._launch_comfy()
             return
-        self.append_log("正在检查 ComfyUI 与插件依赖是否满足...\n")
+        self.append_log("\033[33m正在检查 ComfyUI 与插件依赖是否满足...\033[0m\n")
         self._run_precheck(comfy, python)
 
     def _run_precheck(self, comfy: Path, python) -> None:
@@ -2194,15 +2424,15 @@ class MainWindow(QMainWindow):
     def _on_deps_checked(self, result) -> None:
         self._precheck_worker = None
         if result is None:
-            self.append_log("依赖检查未能完成，直接启动 ComfyUI。\n")
+            self.append_log("\033[33m依赖检查未能完成，直接启动 ComfyUI。\033[0m\n")
             self._launch_comfy()
             return
         if result.ok:
-            self.append_log(result.summary() + "\n")
+            self.append_log("\033[32m" + result.summary() + "\033[0m\n")
             self._launch_comfy()
             return
         # Something missing: prompt the user.
-        self.append_log("依赖检查：" + result.summary() + "\n")
+        self.append_log("\033[33m依赖检查：" + result.summary() + "\033[0m\n")
         lines = []
         for path, refs in result.missing_files.items():
             title = path.parent.name if path.parent != self.comfy_dir() else "ComfyUI"
@@ -2246,7 +2476,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "任务进行中", "已有后台任务正在运行，请等待完成。")
             return
         self.show_page("console")
-        self.append_log(f"\n== {title} ==\n")
+        self.append_log(f"\n\033[1;36m== {title} ==\033[0m\n")
         handle = TaskHandle(commands)
         self.current_task = handle
         handle.output.connect(self.append_log)
@@ -2254,16 +2484,18 @@ class MainWindow(QMainWindow):
         handle.start()
 
     def on_task_finished(self, ok: bool, message: str) -> None:
-        self.append_log(f"\n== {'完成' if ok else '失败'}：{message} ==\n")
+        tail = "完成" if ok else "失败"
+        color = "\033[32m" if ok else "\033[1;31m"
+        self.append_log(f"\n{color}== {tail}: {message} ==\033[0m\n")
         was_install_for_launch = self._pending_launch
         self._pending_launch = False
         self.current_task = None
         self.refresh_pages()
         if was_install_for_launch and ok:
-            self.append_log("依赖安装完成，自动启动 ComfyUI。\n")
+            self.append_log("\033[32m依赖安装完成，自动启动 ComfyUI。\033[0m\n")
             self._launch_comfy()
         elif was_install_for_launch and not ok:
-            self.append_log("依赖安装失败，已取消启动。\n")
+            self.append_log("\033[1;31m依赖安装失败，已取消启动。\033[0m\n")
 
     def run_git_action(self, action, title: str) -> None:
         comfy = self.comfy_dir()
@@ -2271,13 +2503,13 @@ class MainWindow(QMainWindow):
             action(GitService(comfy))
         except DirtyRepositoryError as exc:
             QMessageBox.warning(self, "已阻止", str(exc))
-            self.append_log(f"{title} 已阻止：{exc}\n")
+            self.append_log(f"\033[33m{title} 已阻止：{exc}\033[0m\n")
             return
         except GitError as exc:
             QMessageBox.warning(self, "Git 失败", str(exc))
-            self.append_log(f"{title} 失败：{exc}\n")
+            self.append_log(f"\033[1;31m{title} 失败：{exc}\033[0m\n")
             return
-        self.append_log(f"{title} 完成。\n")
+        self.append_log(f"\033[32m{title} 完成。\033[0m\n")
         self.refresh_pages()
 
     def install_or_update_manager(self) -> None:

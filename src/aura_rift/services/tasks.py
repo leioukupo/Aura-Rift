@@ -39,8 +39,8 @@ class CommandWorker(QObject):
                     self.finished.emit(False, "任务已取消")
                     return
                 if command.title:
-                    self.output.emit(f"\n$ {command.title}\n")
-                self.output.emit(f"$ {' '.join(command.args)}\n")
+                    self.output.emit(f"\n\033[1;36m{command.title}\033[0m\n")
+                self.output.emit(f"\033[2m$ {' '.join(command.args)}\033[0m\n")
                 env = os.environ.copy()
                 env.update(command.env)
                 # Don't let the launcher's own virtualenv leak into spawned
