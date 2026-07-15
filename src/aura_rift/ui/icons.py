@@ -45,49 +45,29 @@ NAV_ICON_PATHS: dict[str, str] = {
 def make_nav_icon(name: str, color: str, pixel_size: int = 28) -> QIcon:
     """Render a lucide-style stroke icon to a QIcon at a uniform pixel size.
 
-    Each glyph is fit into the same centered content box inside a 24x24 grid,
-    so the rocket, gear, terminal arrow, etc. all read as the same visual
-    size regardless of how much of the grid their path data actually covers.
+    Lucide paths are authored to fit a 24x24 grid with a ~2px stroke, so they
+    are rendered directly without any custom transform.  Earlier code tried to
+    auto-fit every glyph by parsing raw path numbers, but that broke on SVG
+    arc/bezier commands (which carry 4-7 params, not 2) and produced oddly
+    scaled/offset icons.
     """
-    import re
     from PySide6.QtSvg import QSvgRenderer
     from PySide6.QtGui import QGuiApplication
 
     svg_body = NAV_ICON_PATHS.get(name, "")
 
-    nums = [float(v) for v in re.findall(r"-?\d+(?:\.\d+)?", svg_body)]
-    if len(nums) < 4:
-        min_x = min_y = 0.0
-        w = h = 24.0
-    else:
-        xs = nums[0::2]
-        ys = nums[1::2]
-        min_x, min_y = min(xs), min(ys)
-        w = max(max(xs) - min_x, 1e-3)
-        h = max(max(ys) - min_y, 1e-3)
-
-    box = 20.0  # uniform content footprint inside the 24x24 grid
-    scale = box / max(w, h)
-    scaled_w = w * scale
-    scaled_h = h * scale
-    # translate so the scaled content is centered in 24x24
-    ax = (24.0 - scaled_w) / 2.0 - scale * min_x
-    ay = (24.0 - scaled_h) / 2.0 - scale * min_y
-
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
-        f'stroke="{color}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" '
-        'vector-effect="non-scaling-stroke">'
-        f'<g transform="translate({ax:.4f} {ay:.4f}) scale({scale:.4f} {scale:.4f})">'
-        f'{svg_body}</g>'
-        '<style>@media all{path,line,polyline,circle,rect,ellipse{vector-effect:non-scaling-stroke}}</style>'
-        '</svg>'
+        f'stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
+        f'>{svg_body}</svg>'
     )
 
     dpr = 1.0
     screen = QGuiApplication.primaryScreen()
     if screen is not None:
-        dpr = max(screen.devicePixelRatio(), 1.0)
+        dpr = screen.devicePixelRatio()
+    if dpr < 1.0:
+        dpr = 1.0
     pix = int(round(max(1.0, dpr) * pixel_size))
     renderer = QSvgRenderer(QByteArray(svg.encode()))
     pixmap = QPixmap(pix, pix)
