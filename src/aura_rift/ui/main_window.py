@@ -479,7 +479,15 @@ class AdvancedPage(QWidget):
 
     def _build_launch_options(self) -> QWidget:
         page = QWidget()
-        root = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("launchScroll")
+        inner = QWidget()
+        scroll.setWidget(inner)
+        root = QVBoxLayout(inner)
         root.setContentsMargins(28, 28, 28, 28)
         root.setSpacing(14)
 
@@ -588,6 +596,9 @@ class AdvancedPage(QWidget):
         form.addWidget(self.extra_args, 7, 1)
         root.addWidget(network_card)
 
+        root.addStretch(1)
+        outer.addWidget(scroll, 1)
+
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         reset = QPushButton("恢复默认设置")
@@ -596,8 +607,7 @@ class AdvancedPage(QWidget):
         save.clicked.connect(self.apply_launch_options)
         buttons.addWidget(reset)
         buttons.addWidget(save)
-        root.addLayout(buttons)
-        root.addStretch(1)
+        outer.addLayout(buttons)
         return page
 
     def _build_full_params(self) -> QWidget:
@@ -919,7 +929,15 @@ class AdvancedPage(QWidget):
 
     def _build_maintenance(self) -> QWidget:
         page = QWidget()
-        root = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setObjectName("maintScroll")
+        inner = QWidget()
+        scroll.setWidget(inner)
+        root = QVBoxLayout(inner)
         root.setContentsMargins(28, 28, 28, 28)
         root.setSpacing(14)
 
@@ -982,6 +1000,7 @@ class AdvancedPage(QWidget):
         action_layout.addWidget(manager, 2, 0, 1, 2)
         root.addWidget(actions)
         root.addStretch(1)
+        outer.addWidget(scroll, 1)
         return page
 
     def combo(self, items: list[tuple[str, str]], current: str) -> QComboBox:
