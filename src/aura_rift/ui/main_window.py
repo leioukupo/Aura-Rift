@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QSize, Qt, Signal, QUrl
+from PySide6.QtCore import QSize, Qt, Signal, QUrl
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -67,32 +67,7 @@ from aura_rift.services.git_service import DirtyRepositoryError, GitError, GitSe
 from aura_rift.services.registry import ExtensionEntry, get_extensions, mark_installed, search_entries
 from aura_rift.services.tasks import CommandSpec, TaskHandle
 from aura_rift.theme import stylesheet
-from aura_rift.ui.icons import make_nav_icon
-
-
-
-def make_lightbulb_icon(color: str) -> QIcon:
-    """Render a simple lightbulb SVG to a QIcon using the given icon color."""
-    svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">'
-        '<circle cx="16" cy="13" r="9" fill="#f4b942" opacity="0.9"/>'
-        '<line x1="16" y1="1" x2="16" y2="3" stroke="#f4b942" stroke-width="1.5" stroke-linecap="round"/>'
-        '<line x1="5.5" y1="3" x2="7" y2="4.5" stroke="#f4b942" stroke-width="1.5" stroke-linecap="round"/>'
-        '<line x1="26.5" y1="3" x2="25" y2="4.5" stroke="#f4b942" stroke-width="1.5" stroke-linecap="round"/>'
-        f'<rect x="12" y="21" width="8" height="2.5" rx="1" fill="{color}"/>'
-        f'<rect x="13" y="24.5" width="6" height="2" rx="1" fill="{color}"/>'
-        f'<rect x="14" y="27.5" width="4" height="2" rx="0.5" fill="{color}"/>'
-        '</svg>'
-    )
-    from PySide6.QtSvg import QSvgRenderer
-
-    renderer = QSvgRenderer(QByteArray(svg.encode()))
-    pixmap = QPixmap(24, 24)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    renderer.render(painter)
-    painter.end()
-    return QIcon(pixmap)
+from aura_rift.ui.icons import make_lightbulb_icon, make_nav_icon
 
 
 import re
