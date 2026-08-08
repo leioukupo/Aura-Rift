@@ -238,9 +238,58 @@ class GitService:
                 raise err
         _run_git(self.repo_path, ["checkout", revision], timeout=120)
 
-    def pull_fast_forward(self) -> None:
+    def _default_branch(self) -> str | None:
+        """Best-effort local name of the repository's default branch.
+
+        Used to recover from a detached HEAD: prefer the remote's published
+        HEAD (origin/HEAD), then fall back to the usual master/main names.
+        """
+        try:
+            ref = _run_git(
+                self.repo_path,
+                ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+            )
+        except GitError:
+            ref = ""
+        if ref:
+            name = ref.removeprefix("origin/")
+            if name:
+                return name
+        for name in ("master", "main"):
+            for ref_spec in (f"refs/heads/{name}", f"refs/remotes/origin/{name}"):
+                try:
+                    _run_git(self.repo_path, ["rev-parse", "--verify", "--quiet", ref_spec])
+                    return name
+                except GitError:
+                    pass
+        return None
+
+    def fast_forward_commands(self, require_clean: bool = True) -> list[list[str]]:
+        """Return git argument lists that fast-forward the repo to its remote tip.
+
+        A plain ``git pull --ff-only`` fails when the repo is in detached HEAD
+        (for example after checking out an old commit or a tag). In that case
+        the repo is first moved back onto its default branch, then updated.
+        """
         self.ensure_repo()
-        err = self._dirty_error("更新")
-        if err is not None:
-            raise err
-        _run_git(self.repo_path, ["pull", "--ff-only"], timeout=180)
+        if require_clean:
+            err = self._dirty_error("更新")
+            if err is not None:
+                raise err
+        if self.current_branch():
+            return [["pull", "--ff-only"]]
+        default = self._default_branch()
+        if default is None:
+            raise GitError(
+                "当前不在任何分支上，且无法确定默认分支。\n"
+                "请先在“版本”页选择分支并点击“切换分支”，然后再更新。"
+            )
+        return [
+            ["fetch", "--all", "--tags", "--prune"],
+            ["checkout", default],
+            ["pull", "--ff-only"],
+        ]
+
+    def pull_fast_forward(self) -> None:
+        for args in self.fast_forward_commands():
+            _run_git(self.repo_path, args, timeout=180)

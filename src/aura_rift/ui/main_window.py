@@ -1815,15 +1815,18 @@ class VersionPage(QWidget):
         )
 
     def update_core(self) -> None:
+        comfy = self.window.comfy_dir()
         try:
-            git = GitService(self.window.comfy_dir())
-            git.assert_clean("更新")
+            commands = GitService(comfy).fast_forward_commands()
         except (DirtyRepositoryError, GitError) as exc:
             QMessageBox.warning(self, "已阻止", str(exc))
             self.window.append_log(f"更新 ComfyUI 已阻止：{exc}\n")
             return
         self.window.run_commands(
-            [CommandSpec(["git", "pull", "--ff-only"], cwd=self.window.comfy_dir(), env=self.window.config.network.environment())],
+            [
+                CommandSpec(["git", *args], cwd=comfy, env=self.window.config.network.environment())
+                for args in commands
+            ],
             "更新 ComfyUI",
         )
 
@@ -1849,7 +1852,16 @@ class VersionPage(QWidget):
         if not (path / ".git").exists():
             QMessageBox.warning(self, "无法更新", "选中的扩展不是 Git 仓库。")
             return
-        self.window.run_commands([CommandSpec(["git", "pull", "--ff-only"], cwd=path)], f"更新扩展 {path.name}")
+        try:
+            commands = GitService(path).fast_forward_commands(require_clean=False)
+        except GitError as exc:
+            QMessageBox.warning(self, "无法更新", str(exc))
+            self.window.append_log(f"更新扩展 {path.name} 失败：{exc}\n")
+            return
+        self.window.run_commands(
+            [CommandSpec(["git", *args], cwd=path) for args in commands],
+            f"更新扩展 {path.name}",
+        )
 
     def open_selected_extension(self) -> None:
         path = self.selected_extension_path()
@@ -2492,7 +2504,15 @@ class MainWindow(QMainWindow):
         custom_nodes = ensure_dir(comfy / "custom_nodes")
         manager = custom_nodes / "ComfyUI-Manager"
         if manager.exists():
-            commands = [CommandSpec(["git", "pull", "--ff-only"], cwd=manager)]
+            try:
+                commands = [
+                    CommandSpec(["git", *args], cwd=manager)
+                    for args in GitService(manager).fast_forward_commands(require_clean=False)
+                ]
+            except GitError as exc:
+                QMessageBox.warning(self, "更新失败", str(exc))
+                self.window.append_log(f"更新 ComfyUI-Manager 失败：{exc}\n")
+                return
         else:
             commands = install_manager_commands(comfy, self.config)
         self.run_commands(commands, "安装或更新 ComfyUI-Manager")
