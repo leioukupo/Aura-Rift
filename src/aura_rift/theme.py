@@ -13,7 +13,7 @@ def stylesheet(theme: str) -> str:
 
 _DARK = """
 * {
-    font-family: "Noto Sans CJK SC", "Microsoft YaHei", "Source Han Sans SC", "Segoe UI", sans-serif;
+    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "Droid Sans Fallback", "Microsoft YaHei", "Segoe UI", sans-serif;
     font-size: 14px;
     outline: 0;
 }
@@ -360,7 +360,7 @@ QLabel#mutedTitle { color: #868d9b; font-size: 12px; }
 
 _LIGHT = """
 * {
-    font-family: "Noto Sans CJK SC", "Microsoft YaHei", "Source Han Sans SC", "Segoe UI", sans-serif;
+    font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "Droid Sans Fallback", "Microsoft YaHei", "Segoe UI", sans-serif;
     font-size: 14px;
     outline: 0;
 }

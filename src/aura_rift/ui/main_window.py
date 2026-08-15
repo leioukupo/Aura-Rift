@@ -4,7 +4,7 @@ import shlex
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, Signal, QUrl
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QPixmap, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -30,7 +29,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -59,11 +57,16 @@ from aura_rift.services.comfy import (
     install_manager_commands,
     install_missing_deps_commands,
     install_plugin_command,
-    install_requirements_command,
     reinstall_package_command,
 )
 from aura_rift.services.files import directory_size_hint, ensure_dir, open_path
-from aura_rift.services.git_service import DirtyRepositoryError, GitError, GitService
+from aura_rift.services.git_service import (
+    DirtyRepositoryError,
+    GitChange,
+    GitError,
+    GitService,
+    git_command_args,
+)
 from aura_rift.services.registry import ExtensionEntry, get_extensions, mark_installed, search_entries
 from aura_rift.services.tasks import CommandSpec, TaskHandle
 from aura_rift.theme import stylesheet
@@ -172,10 +175,7 @@ def _normalize_emoji(text: str) -> str:
         return text
     if _EMOJI_AVAILABLE is None:
         _EMOJI_AVAILABLE = _emoji_font_available()
-    emoji_ok = _EMOJI_AVAILABLE
 
-    if _EMOJI_AVAILABLE is None:
-        _EMOJI_AVAILABLE = _emoji_font_available()
     if _EMOJI_AVAILABLE:
         return text  # Qt font fallback renders the glyphs
     text = re.sub(r"[\ue000-\uf8ff]", "-", text)
@@ -1021,11 +1021,6 @@ class AdvancedPage(QWidget):
         group(["disable_dynamic_vram", "enable_dynamic_vram"])
         # text-encoder precision variants are pick-one
         group(["fp16_text_enc", "fp32_text_enc", "bf16_text_enc"])
-        # enable-manager must stay on when its UI is disabled or legacy UI used
-        group_all = [
-            ("disable_manager_ui", "enable_manager_legacy_ui"),  # both off vs legacy
-        ]
-
         # combo + checkbox logical pair: async offload
         async_combo = self.full_widgets.get("async_offload")
         async_disable = self.full_widgets.get("disable_async_offload")
@@ -1172,7 +1167,7 @@ class AdvancedPage(QWidget):
             suffix = "（已安装）" if detected and detected.available else "（未检测到）"
             if detected and detected.has_lock:
                 suffix = "（检测到锁文件）"
-            self.venv_manager_combo.addItem(environment.MANAGER_LABELS[mgr], mgr.value)
+            self.venv_manager_combo.addItem(f"{environment.MANAGER_LABELS[mgr]}{suffix}", mgr.value)
         index = self.venv_manager_combo.findData(self.window.config.venv_manager)
         if index >= 0:
             self.venv_manager_combo.setCurrentIndex(index)
@@ -1327,6 +1322,8 @@ class VersionPage(QWidget):
         super().__init__()
         self.window = window
         self._install_loading = False
+        self._version_tabs_index = 0
+        self._installed_extension_rows: list[Path] = []
         self.extensions_loaded.connect(self._on_extensions_loaded)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1338,19 +1335,38 @@ class VersionPage(QWidget):
         self.version_header_title = label(self.window._tr("ver.core", "内核"), 16, True)
         header_layout.addWidget(self.version_header_title)
         header_layout.addStretch(1)
+        accent = "#38bdb2" if self.window.config.theme != "light" else "#1aa090"
         refresh = QPushButton(self.window._tr("ver.refresh_list", "刷新列表"))
+        refresh.setIcon(make_nav_icon("terminal", accent, 18))
         refresh.clicked.connect(self.reload_extension_list)
         update = QPushButton(self.window._tr("ver.update_all", "一键更新"))
-        update.clicked.connect(self.update_core)
+        update.setIcon(make_nav_icon("git-branch", accent, 18))
+        update.clicked.connect(self.update_all)
         header_layout.addWidget(refresh)
         header_layout.addWidget(update)
         layout.addWidget(header)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_core_tab(), self.window._tr("ver.core", "内核"))
-        tabs.addTab(self._build_extensions_tab(), self.window._tr("ver.extensions", "扩展"))
-        tabs.addTab(self._build_install_tab(), self.window._tr("ver.install", "安装新扩展"))
-        self.version_tab_titles = [self.window._tr("ver.core", "内核"), self.window._tr("ver.extensions", "扩展"), self.window._tr("ver.install", "安装新扩展")]
+        tabs.addTab(
+            self._build_core_tab(),
+            make_nav_icon("git-branch", accent, 18),
+            self.window._tr("ver.core", "内核"),
+        )
+        tabs.addTab(
+            self._build_extensions_tab(),
+            make_nav_icon("wrench", accent, 18),
+            self.window._tr("ver.extensions", "扩展"),
+        )
+        tabs.addTab(
+            self._build_install_tab(),
+            make_nav_icon("rocket", accent, 18),
+            self.window._tr("ver.install", "安装新扩展"),
+        )
+        self.version_tab_titles = [
+            self.window._tr("ver.core", "内核"),
+            self.window._tr("ver.extensions", "扩展"),
+            self.window._tr("ver.install", "安装新扩展"),
+        ]
         self.tabs = tabs
         tabs.currentChanged.connect(self.on_version_tab_changed)
         layout.addWidget(tabs, 1)
@@ -1437,34 +1453,41 @@ class VersionPage(QWidget):
         page = QWidget()
         root = QVBoxLayout(page)
         root.setContentsMargins(24, 24, 24, 24)
-        self.extension_table = QTableWidget(0, 6)
-        self.extension_table.setHorizontalHeaderLabels(["扩展名", "分支", "版本", "状态", "路径", "操作"])
-        header = self.extension_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.Stretch)
-        header.setSectionResizeMode(5, QHeaderView.Interactive)
-        header.setStretchLastSection(False)
-        self.extension_table.setColumnWidth(1, 140)
-        self.extension_table.setColumnWidth(2, 110)
-        self.extension_table.setColumnWidth(3, 96)
-        self.extension_table.setColumnWidth(5, 120)
-        self.extension_table.verticalHeader().setVisible(False)
-        self.extension_table.verticalHeader().setDefaultSectionSize(44)
-        self.extension_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.extension_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        root.addWidget(self.extension_table, 1)
-        buttons = QHBoxLayout()
+        root.setSpacing(12)
+
+        search_row = QHBoxLayout()
+        self.installed_extension_search = QLineEdit()
+        self.installed_extension_search.setPlaceholderText("搜索已安装插件、远程地址、分支...")
+        self.installed_extension_search.textChanged.connect(self.refresh_extensions)
         update_selected = QPushButton("更新选中扩展")
         update_selected.clicked.connect(self.update_selected_extension)
         open_selected = QPushButton("打开选中扩展目录")
         open_selected.clicked.connect(self.open_selected_extension)
-        buttons.addStretch(1)
-        buttons.addWidget(open_selected)
-        buttons.addWidget(update_selected)
-        root.addLayout(buttons)
+        search_row.addWidget(self.installed_extension_search, 1)
+        search_row.addWidget(open_selected)
+        search_row.addWidget(update_selected)
+        root.addLayout(search_row)
+
+        self.extension_table = QTableWidget(0, 6)
+        self.extension_table.setHorizontalHeaderLabels(["插件名", "远程地址", "当前分支", "版本 ID", "更新时间/状态", "操作"])
+        header = self.extension_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.Interactive)
+        header.setSectionResizeMode(5, QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        self.extension_table.setColumnWidth(0, 230)
+        self.extension_table.setColumnWidth(2, 120)
+        self.extension_table.setColumnWidth(3, 100)
+        self.extension_table.setColumnWidth(4, 160)
+        self.extension_table.setColumnWidth(5, 230)
+        self.extension_table.verticalHeader().setVisible(False)
+        self.extension_table.verticalHeader().setDefaultSectionSize(46)
+        self.extension_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.extension_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        root.addWidget(self.extension_table, 1)
         return page
 
     def _build_install_tab(self) -> QWidget:
@@ -1509,23 +1532,24 @@ class VersionPage(QWidget):
         self._current_page = 0
         self._page_size = 100
         self._filtered_extensions: list[ExtensionEntry] = []
-        self.extension_install_list.setHorizontalHeaderLabels(["插件名称", "作者", "类别", "状态", "操作"])
+        self.extension_install_list.setHorizontalHeaderLabels(["插件名称", "简介", "作者/类别", "状态", "操作"])
         header = self.extension_install_list.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.Interactive)
         header.setSectionResizeMode(3, QHeaderView.Interactive)
         header.setSectionResizeMode(4, QHeaderView.Interactive)
         header.setStretchLastSection(False)
-        self.extension_install_list.setColumnWidth(1, 160)
-        self.extension_install_list.setColumnWidth(2, 120)
-        self.extension_install_list.setColumnWidth(3, 80)
+        self.extension_install_list.setColumnWidth(0, 230)
+        self.extension_install_list.setColumnWidth(2, 170)
+        self.extension_install_list.setColumnWidth(3, 90)
         self.extension_install_list.setColumnWidth(4, 120)
         self.extension_install_list.verticalHeader().setVisible(False)
-        self.extension_install_list.verticalHeader().setDefaultSectionSize(44)
+        self.extension_install_list.verticalHeader().setDefaultSectionSize(72)
         self.extension_install_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.extension_install_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.extension_install_list.setMinimumHeight(300)
+        self.extension_install_list.setWordWrap(True)
         root.addWidget(self.extension_install_list, 1)
 
         # Pagination toolbar
@@ -1614,8 +1638,9 @@ class VersionPage(QWidget):
         self.extension_install_list.setRowCount(len(shown))
         for row, entry in enumerate(shown):
             self.extension_install_list.setItem(row, 0, QTableWidgetItem(entry.title))
-            self.extension_install_list.setItem(row, 1, QTableWidgetItem(entry.author))
-            self.extension_install_list.setItem(row, 2, QTableWidgetItem(entry.category))
+            self.extension_install_list.setItem(row, 1, QTableWidgetItem(entry.description or entry.repository_url))
+            author_category = " / ".join(part for part in (entry.author, entry.category) if part)
+            self.extension_install_list.setItem(row, 2, QTableWidgetItem(author_category or "-"))
             self.extension_install_list.setItem(row, 3, QTableWidgetItem("已安装" if entry.installed else "未安装"))
             button_text = "已安装" if entry.installed else "安装"
             button = QPushButton(button_text)
@@ -1778,56 +1803,139 @@ class VersionPage(QWidget):
     def refresh_extensions(self) -> None:
         custom_nodes = self.window.comfy_dir() / "custom_nodes"
         manager = custom_nodes / "ComfyUI-Manager"
-        self.manager_label.setText("ComfyUI-Manager：已安装" if manager.exists() else "ComfyUI-Manager：未安装")
+        if hasattr(self, "manager_label"):
+            self.manager_label.setText("ComfyUI-Manager：已安装" if manager.exists() else "ComfyUI-Manager：未安装")
         if not custom_nodes.exists():
             self.extension_table.setRowCount(0)
+            self._installed_extension_rows = []
             return
         dirs = sorted((p for p in custom_nodes.iterdir() if p.is_dir()), key=lambda p: p.name.lower())
-        self.extension_table.setUpdatesEnabled(False)
-        self.extension_table.setRowCount(len(dirs))
-        for row, child in enumerate(dirs):
-            self.extension_table.setItem(row, 0, QTableWidgetItem(child.name))
-            self.extension_table.setItem(row, 4, QTableWidgetItem(str(child)))
-            if (child / ".git").exists():
+        query = self.installed_extension_search.text().strip().lower() if hasattr(self, "installed_extension_search") else ""
+        rows: list[tuple[Path, str, str, str, str, str, bool]] = []
+        for child in dirs:
+            remote = "-"
+            branch = "-"
+            commit = "-"
+            status = "非 Git 扩展"
+            is_git = (child / ".git").exists()
+            if is_git:
                 try:
                     git = GitService(child)
-                    dirty = "有本地修改" if git.is_dirty() else "干净"
-                    self.extension_table.setItem(row, 1, QTableWidgetItem(git.current_branch()))
-                    self.extension_table.setItem(row, 2, QTableWidgetItem(git.current_commit()[:8]))
-                    self.extension_table.setItem(row, 3, QTableWidgetItem(dirty))
+                    remote = git.remote_url()
+                    branch = git.current_branch() or "(detached)"
+                    commit = git.current_commit()[:8] or "-"
+                    dirty = "有本地修改" if git.is_dirty(include_custom_nodes=True) else "干净"
+                    date = git.current_commit_date()
+                    status = f"{date} · {dirty}" if date else dirty
                 except GitError as exc:
-                    self.extension_table.setItem(row, 3, QTableWidgetItem(str(exc)))
-            else:
-                self.extension_table.setItem(row, 1, QTableWidgetItem("-"))
-                self.extension_table.setItem(row, 2, QTableWidgetItem("-"))
-                self.extension_table.setItem(row, 3, QTableWidgetItem("非 Git 扩展"))
+                    status = f"读取失败：{exc}"
+            haystack = " ".join((child.name, remote, branch, commit, status, str(child))).lower()
+            if query and query not in haystack:
+                continue
+            rows.append((child, remote, branch, commit, status, str(child), is_git))
+        self._installed_extension_rows = [row[0] for row in rows]
+        self.extension_table.setUpdatesEnabled(False)
+        self.extension_table.setRowCount(len(rows))
+        for row, (child, remote, branch, commit, status, _path, is_git) in enumerate(rows):
+            name_item = QTableWidgetItem(child.name)
+            name_item.setData(Qt.UserRole, str(child))
+            self.extension_table.setItem(row, 0, name_item)
+            self.extension_table.setItem(row, 1, QTableWidgetItem(remote))
+            self.extension_table.setItem(row, 2, QTableWidgetItem(branch))
+            self.extension_table.setItem(row, 3, QTableWidgetItem(commit))
+            self.extension_table.setItem(row, 4, QTableWidgetItem(status))
+
+            actions = QWidget()
+            action_layout = QHBoxLayout(actions)
+            action_layout.setContentsMargins(0, 4, 0, 4)
+            action_layout.setSpacing(6)
+            update_btn = QPushButton("更新")
+            update_btn.setFixedHeight(30)
+            update_btn.setEnabled(is_git)
+            update_btn.clicked.connect(lambda _=False, p=child: self.update_extension_path(p))
+            open_btn = QPushButton("打开")
+            open_btn.setFixedHeight(30)
+            open_btn.clicked.connect(lambda _=False, p=child: self.open_extension_path(p))
             uninstall_btn = QPushButton("卸载")
             uninstall_btn.setObjectName("danger")
             uninstall_btn.setFixedHeight(30)
             uninstall_btn.clicked.connect(lambda _=False, p=child: self._uninstall_extension(p))
-            self.extension_table.setCellWidget(row, 5, uninstall_btn)
+            action_layout.addWidget(update_btn)
+            action_layout.addWidget(open_btn)
+            action_layout.addWidget(uninstall_btn)
+            self.extension_table.setCellWidget(row, 5, actions)
         self.extension_table.setUpdatesEnabled(True)
 
     def fetch_core(self) -> None:
+        if not self.window.can_start_task():
+            return
         self.window.run_commands(
-            [CommandSpec(["git", "fetch", "--all", "--tags", "--prune"], cwd=self.window.comfy_dir(), env=self.window.config.network.environment())],
+            [
+                self.window.git_command_spec(
+                    self.window.comfy_dir(),
+                    ["fetch", "--all", "--tags", "--prune"],
+                    "拉取远端信息",
+                )
+            ],
             "拉取远端信息",
         )
 
     def update_core(self) -> None:
+        if not self.window.can_start_task():
+            return
         comfy = self.window.comfy_dir()
-        try:
-            commands = GitService(comfy).fast_forward_commands()
-        except (DirtyRepositoryError, GitError) as exc:
-            QMessageBox.warning(self, "已阻止", str(exc))
-            self.window.append_log(f"更新 ComfyUI 已阻止：{exc}\n")
+        if not (comfy / ".git").exists():
+            QMessageBox.warning(self, "无法更新", "当前 ComfyUI 目录不是 Git 仓库。")
+            return
+        commands = self.window.build_repo_update_commands(
+            comfy,
+            "ComfyUI",
+            include_custom_nodes=False,
+        )
+        if commands is None:
+            return
+        self.window.run_commands(commands, "更新 ComfyUI")
+
+    def update_all(self) -> None:
+        if not self.window.can_start_task():
+            return
+        comfy = self.window.comfy_dir()
+        commands: list[CommandSpec] = []
+        if (comfy / ".git").exists():
+            core_commands = self.window.build_repo_update_commands(
+                comfy,
+                "ComfyUI",
+                include_custom_nodes=False,
+            )
+            if core_commands is None:
+                return
+            commands.extend(core_commands)
+        else:
+            self.window.append_log("跳过 ComfyUI：当前目录不是 Git 仓库。\n")
+
+        custom_nodes = comfy / "custom_nodes"
+        if custom_nodes.exists():
+            for child in sorted((p for p in custom_nodes.iterdir() if p.is_dir()), key=lambda p: p.name.lower()):
+                if not (child / ".git").exists():
+                    self.window.append_log(f"跳过非 Git 扩展：{child.name}\n")
+                    continue
+                plugin_commands = self.window.build_repo_update_commands(
+                    child,
+                    child.name,
+                    include_custom_nodes=True,
+                )
+                if plugin_commands is None:
+                    return
+                commands.extend(plugin_commands)
+        else:
+            self.window.append_log("跳过扩展：custom_nodes 目录不存在。\n")
+
+        if not commands:
+            QMessageBox.information(self, "无需更新", "没有找到可更新的 Git 仓库。")
             return
         self.window.run_commands(
-            [
-                CommandSpec(["git", *args], cwd=comfy, env=self.window.config.network.environment())
-                for args in commands
-            ],
-            "更新 ComfyUI",
+            commands,
+            "一键更新内核与插件",
         )
 
     def checkout_branch(self) -> None:
@@ -1836,36 +1944,57 @@ class VersionPage(QWidget):
             self.checkout_revision(branch)
 
     def checkout_revision(self, revision: str) -> None:
-        self.window.run_git_action(lambda git: git.checkout(revision), f"切换版本：{revision}")
+        if not self.window.can_start_task():
+            return
+        commands = self.window.build_repo_checkout_commands(
+            self.window.comfy_dir(),
+            "ComfyUI",
+            revision,
+            include_custom_nodes=False,
+        )
+        if commands is not None:
+            self.window.run_commands(commands, f"切换版本：{revision}")
 
     def selected_extension_path(self) -> Path | None:
         rows = self.extension_table.selectionModel().selectedRows()
         if not rows:
             QMessageBox.warning(self, "未选择", "请先选择一个扩展。")
             return None
-        return Path(self.extension_table.item(rows[0].row(), 4).text())
+        item = self.extension_table.item(rows[0].row(), 0)
+        if item is None:
+            return None
+        value = item.data(Qt.UserRole)
+        return Path(value) if value else None
 
     def update_selected_extension(self) -> None:
         path = self.selected_extension_path()
+        if path:
+            self.update_extension_path(path)
+
+    def update_extension_path(self, path: Path) -> None:
+        if not self.window.can_start_task():
+            return
         if not path:
             return
         if not (path / ".git").exists():
             QMessageBox.warning(self, "无法更新", "选中的扩展不是 Git 仓库。")
             return
-        try:
-            commands = GitService(path).fast_forward_commands(require_clean=False)
-        except GitError as exc:
-            QMessageBox.warning(self, "无法更新", str(exc))
-            self.window.append_log(f"更新扩展 {path.name} 失败：{exc}\n")
-            return
-        self.window.run_commands(
-            [CommandSpec(["git", *args], cwd=path) for args in commands],
-            f"更新扩展 {path.name}",
+        commands = self.window.build_repo_update_commands(
+            path,
+            path.name,
+            include_custom_nodes=True,
         )
+        if commands is None:
+            return
+        self.window.run_commands(commands, f"更新扩展 {path.name}")
 
     def open_selected_extension(self) -> None:
         path = self.selected_extension_path()
-        if path and not open_path(path):
+        if path:
+            self.open_extension_path(path)
+
+    def open_extension_path(self, path: Path) -> None:
+        if not open_path(path):
             InternalFileBrowser(path, self).exec()
 
     def _uninstall_extension(self, path: Path) -> None:
@@ -1969,16 +2098,15 @@ class SettingsPage(QWidget):
     def __init__(self, window: "MainWindow") -> None:
         super().__init__()
         self.window = window
-        self.nav_buttons: dict[str, QPushButton] = {}
         self.pages: dict[str, QWidget] = {}
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.stack = QStackedWidget()
-        layout.addWidget(self._build_sub_nav())
-        layout.addWidget(self.stack, 1)
+        self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self.tabs, 1)
 
         self.about_browser = QTextBrowser()
         self._build_general()
@@ -1986,41 +2114,24 @@ class SettingsPage(QWidget):
         self._build_proxy()
         self._build_about()
 
-    def _build_sub_nav(self) -> QWidget:
-        side = QFrame()
-        side.setObjectName("settingsNav")
-        side.setFixedWidth(130)
-        nav = QVBoxLayout(side)
-        nav.setContentsMargins(8, 18, 8, 18)
-        nav.setSpacing(8)
-        group = QButtonGroup(side)
-        group.setExclusive(True)
-        items = [
-            ("general", self.window._tr("settings.general", "一般设置")),
-            ("environment", self.window._tr("settings.environment", "环境设置")),
-            ("proxy", self.window._tr("settings.proxy", "代理设置")),
-            ("about", self.window._tr("settings.about", "关于")),
-        ]
-        for name, text in items:
-            button = QPushButton(text)
-            button.setObjectName("navButton")
-            button.setCheckable(True)
-            button.setMinimumHeight(46)
-            button.clicked.connect(lambda _=False, n=name: self.show_sub_page(n))
-            self.nav_buttons[name] = button
-            group.addButton(button)
-            nav.addWidget(button)
-        nav.addStretch(1)
-        return side
+    def _settings_icon(self, name: str) -> QIcon:
+        accent = "#38bdb2" if self.window.config.theme != "light" else "#1aa090"
+        return make_nav_icon(name, accent, 18)
 
     def show_sub_page(self, name: str) -> None:
         page = self.pages.get(name)
         if not page:
             return
-        self.stack.setCurrentWidget(page)
-        if name in self.nav_buttons:
-            self.nav_buttons[name].setChecked(True)
+        self.tabs.setCurrentWidget(page)
         if name == "about":
+            self.about_browser.setMarkdown(bundled_markdown("about.md"))
+
+    def _add_settings_tab(self, name: str, page: QWidget, icon_name: str, title: str) -> None:
+        self.pages[name] = page
+        self.tabs.addTab(page, self._settings_icon(icon_name), title)
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index >= 0 and self.tabs.widget(index) is self.pages.get("about"):
             self.about_browser.setMarkdown(bundled_markdown("about.md"))
 
     def _build_general(self) -> None:
@@ -2043,9 +2154,7 @@ class SettingsPage(QWidget):
         save.clicked.connect(self.save_general)
         root.addLayout(self._save_row(save))
         root.addStretch(1)
-        self.stack.addWidget(page)
-        self.pages["general"] = page
-        self.show_sub_page("general")
+        self._add_settings_tab("general", page, "settings", self.window._tr("settings.general", "一般设置"))
 
     def _build_env(self) -> None:
         page = QWidget()
@@ -2076,8 +2185,7 @@ class SettingsPage(QWidget):
         save.clicked.connect(self.save_env)
         root.addLayout(self._save_row(save))
         root.addStretch(1)
-        self.stack.addWidget(page)
-        self.pages["environment"] = page
+        self._add_settings_tab("environment", page, "wrench", self.window._tr("settings.environment", "环境设置"))
 
     def _build_proxy(self) -> None:
         page = QWidget()
@@ -2112,8 +2220,7 @@ class SettingsPage(QWidget):
         save.clicked.connect(self.save_proxy)
         root.addLayout(self._save_row(save))
         root.addStretch(1)
-        self.stack.addWidget(page)
-        self.pages["proxy"] = page
+        self._add_settings_tab("proxy", page, "git-branch", self.window._tr("settings.proxy", "代理设置"))
 
     def _build_about(self) -> None:
         page = QWidget()
@@ -2121,8 +2228,7 @@ class SettingsPage(QWidget):
         root.setContentsMargins(28, 28, 28, 28)
         self.about_browser.setMarkdown(bundled_markdown("about.md"))
         root.addWidget(self.about_browser, 1)
-        self.stack.addWidget(page)
-        self.pages["about"] = page
+        self._add_settings_tab("about", page, "terminal", self.window._tr("settings.about", "关于"))
 
     def refresh(self) -> None:
         self.about_browser.setMarkdown(bundled_markdown("about.md"))
@@ -2353,6 +2459,119 @@ class MainWindow(QMainWindow):
         if hasattr(self, "console_page"):
             self.console_page.append(text)
 
+    def can_start_task(self) -> bool:
+        if self.current_task is None:
+            return True
+        QMessageBox.warning(self, "任务进行中", "已有后台任务正在运行，请等待完成。")
+        return False
+
+    def git_command_spec(self, repo: Path, args: list[str], title: str = "") -> CommandSpec:
+        return CommandSpec(
+            git_command_args(args, self.config.network.github_proxy),
+            cwd=repo,
+            env=self.config.network.environment(),
+            title=title,
+        )
+
+    def ask_local_change_policy(
+        self,
+        repo: Path,
+        label_text: str,
+        changes: list[GitChange],
+        action: str,
+    ) -> str | None:
+        shown = "\n".join(f"  · {change.label}: {change.path}" for change in changes[:24])
+        extra = f"\n  …等共 {len(changes)} 个改动" if len(changes) > 24 else ""
+        box = QMessageBox(self)
+        box.setWindowTitle("检测到本地修改")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            f"{label_text} 存在本地修改。\n\n"
+            f"{shown}{extra}\n\n"
+            f"请选择如何处理后再{action}。"
+        )
+        box.setInformativeText(str(repo))
+        suffix = "更新" if action == "更新" else "切换"
+        keep_btn = box.addButton(f"保留并{suffix}", QMessageBox.AcceptRole)
+        discard_btn = box.addButton(f"放弃并{suffix}", QMessageBox.DestructiveRole)
+        cancel_btn = box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(keep_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is keep_btn:
+            return "keep"
+        if clicked is discard_btn:
+            return "discard"
+        if clicked is cancel_btn:
+            return None
+        return None
+
+    def _wrap_git_action_commands(
+        self,
+        repo: Path,
+        label_text: str,
+        action: str,
+        git_args: list[list[str]],
+        changes: list[GitChange],
+    ) -> list[CommandSpec] | None:
+        policy = "clean"
+        if changes:
+            policy = self.ask_local_change_policy(repo, label_text, changes, action)
+            if policy is None:
+                self.append_log(f"{label_text} {action}已取消。\n")
+                return None
+
+        specs: list[CommandSpec] = []
+        if policy == "keep":
+            msg = f"Aura-Rift auto stash before {action} {label_text}"
+            for args in GitService.stash_commands(changes, msg):
+                specs.append(self.git_command_spec(repo, args, f"暂存本地修改：{label_text}"))
+        elif policy == "discard":
+            for args in GitService.discard_commands(changes):
+                specs.append(self.git_command_spec(repo, args, f"放弃本地修改：{label_text}"))
+
+        for index, args in enumerate(git_args):
+            title = f"{action}：{label_text}" if index == 0 else ""
+            specs.append(self.git_command_spec(repo, args, title))
+
+        if policy == "keep":
+            for args in GitService.stash_pop_commands(changes):
+                specs.append(self.git_command_spec(repo, args, f"恢复本地修改：{label_text}"))
+        return specs
+
+    def build_repo_update_commands(
+        self,
+        repo: Path,
+        label_text: str,
+        include_custom_nodes: bool = True,
+    ) -> list[CommandSpec] | None:
+        try:
+            git = GitService(repo)
+            changes = git.changes(include_custom_nodes=include_custom_nodes)
+            git_args = git.fast_forward_commands(require_clean=False)
+        except GitError as exc:
+            QMessageBox.warning(self, "无法更新", str(exc))
+            self.append_log(f"更新 {label_text} 失败：{exc}\n")
+            return None
+        return self._wrap_git_action_commands(repo, label_text, "更新", git_args, changes)
+
+    def build_repo_checkout_commands(
+        self,
+        repo: Path,
+        label_text: str,
+        revision: str,
+        include_custom_nodes: bool = False,
+    ) -> list[CommandSpec] | None:
+        try:
+            git = GitService(repo)
+            changes = git.changes(include_custom_nodes=include_custom_nodes)
+            git_args = git.checkout_commands(revision, require_clean=False)
+        except GitError as exc:
+            QMessageBox.warning(self, "Git 失败", str(exc))
+            self.append_log(f"切换 {label_text} 失败：{exc}\n")
+            return None
+        return self._wrap_git_action_commands(repo, label_text, "切换版本", git_args, changes)
+
     def on_process_state(self, state: str) -> None:
         if hasattr(self, "console_page"):
             self.console_page.set_status(state)
@@ -2433,7 +2652,7 @@ class MainWindow(QMainWindow):
         box.setText(f"检测到 ComfyUI 启动所需依赖不满足。\n\n{detail}\n\n是否自动安装缺失依赖并启动？")
         install_btn = box.addButton("安装并启动", QMessageBox.AcceptRole)
         launch_btn = box.addButton("直接启动", QMessageBox.RejectRole)
-        cancel_btn = box.addButton("取消", QMessageBox.DestructiveRole)
+        box.addButton("取消", QMessageBox.DestructiveRole)
         box.setDefaultButton(install_btn)
         box.exec()
         choice = box.clickedButton()
@@ -2500,18 +2719,18 @@ class MainWindow(QMainWindow):
         self.refresh_pages()
 
     def install_or_update_manager(self) -> None:
+        if not self.can_start_task():
+            return
         comfy = self.comfy_dir()
         custom_nodes = ensure_dir(comfy / "custom_nodes")
         manager = custom_nodes / "ComfyUI-Manager"
         if manager.exists():
-            try:
-                commands = [
-                    CommandSpec(["git", *args], cwd=manager)
-                    for args in GitService(manager).fast_forward_commands(require_clean=False)
-                ]
-            except GitError as exc:
-                QMessageBox.warning(self, "更新失败", str(exc))
-                self.window.append_log(f"更新 ComfyUI-Manager 失败：{exc}\n")
+            commands = self.build_repo_update_commands(
+                manager,
+                "ComfyUI-Manager",
+                include_custom_nodes=True,
+            )
+            if commands is None:
                 return
         else:
             commands = install_manager_commands(comfy, self.config)

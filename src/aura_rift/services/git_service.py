@@ -29,6 +29,29 @@ class CommitInfo:
     current: bool = False
 
 
+@dataclass(frozen=True)
+class GitChange:
+    path: str
+    status: str
+    tracked: bool = True
+
+    @property
+    def label(self) -> str:
+        labels = {
+            "??": "未跟踪",
+            "A": "新增",
+            "M": "修改",
+            "D": "删除",
+            "R": "重命名",
+            "C": "复制",
+            "U": "冲突",
+        }
+        keys = [c for c in self.status if c.strip()]
+        if not keys:
+            return "已修改"
+        return "/".join(labels.get(k, k) for k in keys)
+
+
 def _run_git(path: Path, args: list[str], timeout: int = 30) -> str:
     proc = subprocess.run(
         ["git", *args],
@@ -42,6 +65,22 @@ def _run_git(path: Path, args: list[str], timeout: int = 30) -> str:
         message = proc.stderr.strip() or proc.stdout.strip() or "git command failed"
         raise GitError(message)
     return proc.stdout.strip()
+
+
+def git_command_args(args: list[str], github_proxy: str = "") -> list[str]:
+    """Build a git command, optionally using a temporary GitHub mirror rewrite."""
+    command = ["git"]
+    proxy = github_proxy.strip()
+    if proxy:
+        base = proxy.rstrip("/") + "/https://github.com/"
+        command.extend([
+            "-c",
+            f"url.{base}.insteadOf=https://github.com/",
+            "-c",
+            f"url.{base}.insteadOf=git@github.com:",
+        ])
+    command.extend(args)
+    return command
 
 
 class GitService:
@@ -88,7 +127,14 @@ class GitService:
             return ""
         return _run_git(self.repo_path, ["rev-parse", "HEAD"])
 
-    def dirty_files(self, include_custom_nodes: bool = False) -> list[str]:
+    def current_commit_date(self) -> str:
+        self.ensure_repo()
+        if not self._has_head():
+            return ""
+        date = _run_git(self.repo_path, ["log", "-1", "--date=iso-strict", "--pretty=format:%cd"])
+        return date.replace("T", " ").split("+")[0]
+
+    def changes(self, include_custom_nodes: bool = False) -> list[GitChange]:
         """Return repository-relative paths with uncommitted changes.
 
         By default custom_nodes/ is excluded, because user-installed plugins
@@ -98,39 +144,32 @@ class GitService:
         self.ensure_repo()
         if not self._has_head():
             return []
-        # Use subprocess directly (not _run_git) because git status --porcelain uses a leading space to mean "not staged", and _run_git strips it.
         proc = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all", "--no-renames"],
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"],
             cwd=str(self.repo_path),
-            text=True,
+            text=False,
             capture_output=True,
             timeout=30,
             check=False,
         )
         if proc.returncode != 0:
-            raise GitError(proc.stderr.strip() or "git status failed")
-        raw = proc.stdout
-        files: list[str] = []
-        for line in raw.splitlines():
-            if not line:
+            message = proc.stderr.decode(errors="replace").strip() or "git status failed"
+            raise GitError(message)
+        changes: list[GitChange] = []
+        for entry in proc.stdout.split(b"\0"):
+            if not entry:
                 continue
-            path = line[3:]  # drop the two status chars + a space
-            # quoted when the path contains whitespace/non-ascii
-            if path.startswith('"') and path.endswith('"'):
-                from shlex import shlex
-                try:
-                    tokens = list(shlex(path, posix=True))
-                    if tokens:
-                        path = tokens[0]
-                except ValueError:
-                    path = path.strip('"')
-            # only the path part before ' -> ' for renames (we passed --no-renames
-            # so this should be the plain path, but be defensive)
-            path = path.split(" -> ", 1)[-1]
+            if len(entry) < 4:
+                continue
+            status = entry[:2].decode("ascii", errors="replace")
+            path = entry[3:].decode("utf-8", errors="surrogateescape")
             if not include_custom_nodes and (path == "custom_nodes" or path.startswith("custom_nodes/")):
                 continue
-            files.append(path)
-        return files
+            changes.append(GitChange(path=path, status=status, tracked=status != "??"))
+        return changes
+
+    def dirty_files(self, include_custom_nodes: bool = False) -> list[str]:
+        return [change.path for change in self.changes(include_custom_nodes=include_custom_nodes)]
 
     def is_dirty(self, include_custom_nodes: bool = False) -> bool:
         self.ensure_repo()
@@ -238,6 +277,14 @@ class GitService:
                 raise err
         _run_git(self.repo_path, ["checkout", revision], timeout=120)
 
+    def checkout_commands(self, revision: str, require_clean: bool = True) -> list[list[str]]:
+        self.ensure_repo()
+        if require_clean:
+            err = self._dirty_error("切换版本")
+            if err is not None:
+                raise err
+        return [["checkout", revision]]
+
     def _default_branch(self) -> str | None:
         """Best-effort local name of the repository's default branch.
 
@@ -293,3 +340,28 @@ class GitService:
     def pull_fast_forward(self) -> None:
         for args in self.fast_forward_commands():
             _run_git(self.repo_path, args, timeout=180)
+
+    @staticmethod
+    def stash_commands(changes: list[GitChange], message: str) -> list[list[str]]:
+        if not changes:
+            return []
+        return [["stash", "push", "-u", "-m", message, "--", *(change.path for change in changes)]]
+
+    @staticmethod
+    def stash_pop_commands(changes: list[GitChange]) -> list[list[str]]:
+        if not changes:
+            return []
+        return [["stash", "pop"]]
+
+    @staticmethod
+    def discard_commands(changes: list[GitChange]) -> list[list[str]]:
+        if not changes:
+            return []
+        tracked = [change.path for change in changes if change.tracked]
+        untracked = [change.path for change in changes if not change.tracked]
+        commands: list[list[str]] = []
+        if tracked:
+            commands.append(["restore", "--staged", "--worktree", "--", *tracked])
+        if untracked:
+            commands.append(["clean", "-fd", "--", *untracked])
+        return commands

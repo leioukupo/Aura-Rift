@@ -491,7 +491,7 @@ def check_dependencies(
             check=False,
         )
         data = json.loads(proc.stdout.strip() or "{}")
-    except Exception as exc:  # noqa: BLE001 - never block launch on a check failure
+    except Exception:  # noqa: BLE001 - never block launch on a check failure
         check.installed_count = -1
         check.missing_files = {}
         return check
