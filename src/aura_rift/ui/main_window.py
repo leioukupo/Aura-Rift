@@ -2510,30 +2510,65 @@ class MainWindow(QMainWindow):
         changes: list[GitChange],
         action: str,
     ) -> str | None:
-        shown = "\n".join(f"  · {change.label}: {change.path}" for change in changes[:24])
-        extra = f"\n  …等共 {len(changes)} 个改动" if len(changes) > 24 else ""
-        box = QMessageBox(self)
-        box.setWindowTitle("检测到本地修改")
-        box.setIcon(QMessageBox.Warning)
-        box.setText(
-            f"{label_text} 存在本地修改。\n\n"
-            f"{shown}{extra}\n\n"
-            f"请选择如何处理后再{action}。"
-        )
-        box.setInformativeText(str(repo))
+        dialog = QDialog(self)
+        dialog.setWindowTitle("检测到本地修改")
+        dialog.setModal(True)
+
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+
+        title = label(f"{label_text} 存在本地修改", 16, True)
+        root.addWidget(title)
+        root.addWidget(label(f"仓库：{repo}"))
+        root.addWidget(label(f"以下 {len(changes)} 个改动会影响{action}，请选择处理方式。"))
+
+        change_list = QPlainTextEdit()
+        change_list.setReadOnly(True)
+        change_list.setLineWrapMode(QPlainTextEdit.NoWrap)
+        change_list.setPlainText("\n".join(f"{change.label}: {change.path}" for change in changes))
+        change_list.setMinimumHeight(180)
+        change_list.setMaximumHeight(360)
+        root.addWidget(change_list, 1)
+
+        hint = QLabel("保留：先暂存改动，更新后再恢复；放弃：丢弃上面列出的改动后继续。")
+        hint.setObjectName("footnote")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
         suffix = "更新" if action == "更新" else "切换"
-        keep_btn = box.addButton(f"保留并{suffix}", QMessageBox.AcceptRole)
-        discard_btn = box.addButton(f"放弃并{suffix}", QMessageBox.DestructiveRole)
-        cancel_btn = box.addButton("取消", QMessageBox.RejectRole)
-        box.setDefaultButton(keep_btn)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is keep_btn:
-            return "keep"
-        if clicked is discard_btn:
-            return "discard"
-        if clicked is cancel_btn:
+        selected: dict[str, str | None] = {"policy": None}
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel_btn = QPushButton("取消")
+        discard_btn = QPushButton(f"放弃并{suffix}")
+        discard_btn.setObjectName("danger")
+        keep_btn = QPushButton(f"保留并{suffix}")
+        keep_btn.setObjectName("primary")
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(discard_btn)
+        buttons.addWidget(keep_btn)
+        root.addLayout(buttons)
+
+        def choose(policy: str | None) -> None:
+            selected["policy"] = policy
+            dialog.accept() if policy else dialog.reject()
+
+        keep_btn.clicked.connect(lambda: choose("keep"))
+        discard_btn.clicked.connect(lambda: choose("discard"))
+        cancel_btn.clicked.connect(lambda: choose(None))
+
+        screen = QApplication.primaryScreen()
+        max_h = 560
+        if screen is not None:
+            max_h = max(420, min(max_h, screen.availableGeometry().height() - 80))
+        dialog.resize(760, max_h)
+        if dialog.exec() != QDialog.Accepted:
             return None
+        if selected["policy"] == "keep":
+            return "keep"
+        if selected["policy"] == "discard":
+            return "discard"
         return None
 
     def _wrap_git_action_commands(
