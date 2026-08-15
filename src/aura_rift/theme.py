@@ -125,9 +125,13 @@ QComboBox QAbstractItemView {
 QPlainTextEdit#console {
     background: #0c0d11;
     color: #d6e2d0;
-    border: 0;
-    border-top: 1px solid #23263a;
+    border: 1px solid #23263a;
+    border-radius: 0;
+    padding: 12px 14px;
     font-family: "JetBrains Mono", "Cascadia Code", "Consolas", "Noto Color Emoji", "Noto Sans Mono CJK SC", monospace;
+    font-size: 13px;
+    selection-background-color: #2a433f;
+    selection-color: #ffffff;
 }
 QPushButton {
     background: #2b2f3a;
@@ -472,9 +476,13 @@ QComboBox QAbstractItemView {
 QPlainTextEdit#console {
     background: #101116;
     color: #d6e2d0;
-    border: 0;
-    border-top: 1px solid #e3e6ec;
+    border: 1px solid #d3d7df;
+    border-radius: 0;
+    padding: 12px 14px;
     font-family: "JetBrains Mono", "Cascadia Code", "Consolas", "Noto Color Emoji", "Noto Sans Mono CJK SC", monospace;
+    font-size: 13px;
+    selection-background-color: #2a433f;
+    selection-color: #ffffff;
 }
 QPushButton {
     background: #ffffff;

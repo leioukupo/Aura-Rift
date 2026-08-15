@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,7 +41,8 @@ class CommandWorker(QObject):
                     return
                 if command.title:
                     self.output.emit(f"\n\033[1;36m{command.title}\033[0m\n")
-                self.output.emit(f"\033[2m$ {' '.join(command.args)}\033[0m\n")
+                rendered_command = " ".join(shlex.quote(part) for part in command.args)
+                self.output.emit(f"\033[2m$ {rendered_command}\033[0m\n")
                 env = os.environ.copy()
                 env.update(command.env)
                 # Don't let the launcher's own virtualenv leak into spawned

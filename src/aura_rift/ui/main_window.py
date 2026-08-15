@@ -251,8 +251,34 @@ class AnsiConsoleParser:
             return
         plain = _CTRL_RE.sub("", raw)
         plain = _normalize_emoji(plain)
-        if plain:
-            cursor.insertText(plain, self._fmt)
+        if not plain:
+            return
+        for part in plain.splitlines(keepends=True):
+            cursor.insertText(part, self._format_for_plain(part))
+
+    def _format_for_plain(self, text: str) -> QTextCharFormat:
+        if self._bg is not None or self._bold or self._italic or self._underline or self._fg != self._default_fg:
+            return self._fmt
+        line = text.strip().lower()
+        if not line:
+            return self._fmt
+
+        def fmt(color: str, *, bold: bool = False, italic: bool = False) -> QTextCharFormat:
+            out = QTextCharFormat(self._fmt)
+            out.setForeground(QBrush(QColor(color)))
+            out.setFontWeight(QFont.Bold if bold else QFont.Normal)
+            out.setFontItalic(italic)
+            return out
+
+        if line.startswith(("fatal:", "error:", "exception", "traceback")) or " failed" in line or "失败" in line or "错误" in line:
+            return fmt("#ff8a80", bold=True)
+        if line.startswith(("warning:", "warn:", "hint:")) or "warning" in line or "警告" in line:
+            return fmt("#f5d76b", italic=line.startswith("hint:"))
+        if line.startswith(("from ", "来自 ", "remote:", "取得：", "命中：")):
+            return fmt("#8ae8f0")
+        if line.startswith(("already up to date", "已经是最新", "done", "完成")):
+            return fmt("#a3f7a3")
+        return self._fmt
 
     def feed(self, text: str, widget: QPlainTextEdit) -> None:
         if not text:
@@ -483,6 +509,9 @@ class ConsolePage(QWidget):
         self.output = QPlainTextEdit()
         self.output.setObjectName("console")
         self.output.setReadOnly(True)
+        self.output.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.output.setUndoRedoEnabled(False)
+        self.output.document().setMaximumBlockCount(12000)
         # Monospace with emoji + CJK fallback so glyphs like fire / ok / arrows
         # render instead of tofu even though no single font covers everything.
         console_font = QFont()
@@ -493,6 +522,7 @@ class ConsolePage(QWidget):
             "Microsoft YaHei", "monospace",
         ])
         self.output.setFont(console_font)
+        self.output.setTabStopDistance(self.output.fontMetrics().horizontalAdvance(" ") * 4)
         self.parser = AnsiConsoleParser()
         layout.addWidget(self.output, 1)
 

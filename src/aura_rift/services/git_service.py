@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,7 +70,7 @@ def _run_git(path: Path, args: list[str], timeout: int = 30) -> str:
 
 def git_command_args(args: list[str], github_proxy: str = "") -> list[str]:
     """Build a git command, optionally using a temporary GitHub mirror rewrite."""
-    command = ["git"]
+    command = ["git", "-c", "color.ui=always"]
     proxy = github_proxy.strip()
     if proxy:
         base = proxy.rstrip("/") + "/https://github.com/"
@@ -311,26 +312,80 @@ class GitService:
                     pass
         return None
 
-    def fast_forward_commands(self, require_clean: bool = True) -> list[list[str]]:
-        """Return git argument lists that fast-forward the repo to its remote tip.
+    def _remote_ref_for_branch(self, branch: str) -> str | None:
+        """Best-effort remote ref for a local branch.
 
-        A plain ``git pull --ff-only`` fails when the repo is in detached HEAD
-        (for example after checking out an old commit or a tag). In that case
-        the repo is first moved back onto its default branch, then updated.
+        Prefer the configured upstream, then the common origin/<branch> layout.
+        """
+        try:
+            upstream = _run_git(
+                self.repo_path,
+                ["rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{branch}@{{upstream}}"],
+            )
+        except GitError:
+            upstream = ""
+        if upstream:
+            return upstream
+        try:
+            _run_git(
+                self.repo_path,
+                ["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+            )
+            return f"origin/{branch}"
+        except GitError:
+            return None
+
+    def _backup_branch_name(self, branch: str) -> str:
+        short = (self.current_commit() or "head")[:12]
+        safe_branch = re.sub(r"[^A-Za-z0-9._/-]+", "-", branch).strip("./")
+        safe_branch = re.sub(r"/+", "/", safe_branch).replace("..", ".")
+        if not safe_branch:
+            safe_branch = "detached"
+        return f"aura-rift-backup/{safe_branch}-{short}"
+
+    def fast_forward_commands(self, require_clean: bool = True) -> list[list[str]]:
+        """Return git argument lists that update the repo to its remote tip.
+
+        A plain ``git pull --ff-only`` fails after upstream rewrites history,
+        which is common for some ComfyUI custom nodes. For branches with a
+        known remote, make a lightweight backup ref to the current commit, then
+        reset to the fetched remote tip. This handles normal fast-forwards and
+        forced updates with one path while still preserving the old commit.
+
+        Detached HEAD repos are moved back onto their default branch first.
         """
         self.ensure_repo()
         if require_clean:
             err = self._dirty_error("更新")
             if err is not None:
                 raise err
-        if self.current_branch():
+        if not self._has_head():
             return [["pull", "--ff-only"]]
+
+        branch = self.current_branch()
+        if branch:
+            remote_ref = self._remote_ref_for_branch(branch)
+            if remote_ref:
+                return [
+                    ["fetch", "--all", "--tags", "--prune"],
+                    ["branch", "-f", self._backup_branch_name(branch), "HEAD"],
+                    ["reset", "--hard", remote_ref],
+                ]
+            return [["pull", "--ff-only"]]
+
         default = self._default_branch()
         if default is None:
             raise GitError(
                 "当前不在任何分支上，且无法确定默认分支。\n"
                 "请先在“版本”页选择分支并点击“切换分支”，然后再更新。"
             )
+        remote_ref = self._remote_ref_for_branch(default)
+        if remote_ref:
+            return [
+                ["fetch", "--all", "--tags", "--prune"],
+                ["branch", "-f", self._backup_branch_name(default), "HEAD"],
+                ["checkout", "-B", default, remote_ref],
+            ]
         return [
             ["fetch", "--all", "--tags", "--prune"],
             ["checkout", default],

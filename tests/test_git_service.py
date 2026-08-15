@@ -81,6 +81,28 @@ class GitServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_branch_update_resets_to_remote_with_backup(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        origin = Path(tmp.name) / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+        repo = self.make_repo()
+        self.commit_file(repo, "main.py", "one\n", "one")
+        head = self.git(repo, "rev-parse", "--short=12", "HEAD")
+        self.git(repo, "remote", "add", "origin", str(origin))
+        self.git(repo, "push", "-u", "origin", "master")
+
+        commands = GitService(repo).fast_forward_commands(require_clean=False)
+
+        self.assertEqual(
+            commands,
+            [
+                ["fetch", "--all", "--tags", "--prune"],
+                ["branch", "-f", f"aura-rift-backup/master-{head}", "HEAD"],
+                ["reset", "--hard", "origin/master"],
+            ],
+        )
+
     def test_stash_and_discard_commands_are_pathsafe(self) -> None:
         changes = [
             GitChange(path="空 格.txt", status=" M", tracked=True),
@@ -106,6 +128,7 @@ class GitServiceTests(unittest.TestCase):
         command = git_command_args(["pull", "--ff-only"], "https://gh-proxy.example/")
 
         self.assertEqual(self.git(repo, "config", "--get", "remote.origin.url"), "https://github.com/user/repo.git")
+        self.assertEqual(command[:3], ["git", "-c", "color.ui=always"])
         self.assertIn(
             "url.https://gh-proxy.example/https://github.com/.insteadOf=https://github.com/",
             command,
