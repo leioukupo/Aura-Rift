@@ -268,7 +268,7 @@ class GitService:
 
     def fetch(self) -> None:
         self.ensure_repo()
-        _run_git(self.repo_path, ["fetch", "--all", "--tags", "--prune"], timeout=180)
+        _run_git(self.repo_path, ["fetch", "--all", "--tags", "--prune", "--force"], timeout=180)
 
     def checkout(self, revision: str, allow_dirty: bool = False) -> None:
         self.ensure_repo()
@@ -367,7 +367,7 @@ class GitService:
             remote_ref = self._remote_ref_for_branch(branch)
             if remote_ref:
                 return [
-                    ["fetch", "--all", "--tags", "--prune"],
+                    ["fetch", "--all", "--tags", "--prune", "--force"],
                     ["branch", "-f", self._backup_branch_name(branch), "HEAD"],
                     ["reset", "--hard", remote_ref],
                 ]
@@ -382,12 +382,12 @@ class GitService:
         remote_ref = self._remote_ref_for_branch(default)
         if remote_ref:
             return [
-                ["fetch", "--all", "--tags", "--prune"],
+                ["fetch", "--all", "--tags", "--prune", "--force"],
                 ["branch", "-f", self._backup_branch_name(default), "HEAD"],
                 ["checkout", "-B", default, remote_ref],
             ]
         return [
-            ["fetch", "--all", "--tags", "--prune"],
+            ["fetch", "--all", "--tags", "--prune", "--force"],
             ["checkout", default],
             ["pull", "--ff-only"],
         ]

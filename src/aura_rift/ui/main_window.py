@@ -1903,7 +1903,7 @@ class VersionPage(QWidget):
             [
                 self.window.git_command_spec(
                     self.window.comfy_dir(),
-                    ["fetch", "--all", "--tags", "--prune"],
+                    ["fetch", "--all", "--tags", "--prune", "--force"],
                     "拉取远端信息",
                 )
             ],

@@ -75,7 +75,7 @@ class GitServiceTests(unittest.TestCase):
         self.assertEqual(
             commands,
             [
-                ["fetch", "--all", "--tags", "--prune"],
+                ["fetch", "--all", "--tags", "--prune", "--force"],
                 ["checkout", "master"],
                 ["pull", "--ff-only"],
             ],
@@ -97,7 +97,7 @@ class GitServiceTests(unittest.TestCase):
         self.assertEqual(
             commands,
             [
-                ["fetch", "--all", "--tags", "--prune"],
+                ["fetch", "--all", "--tags", "--prune", "--force"],
                 ["branch", "-f", f"aura-rift-backup/master-{head}", "HEAD"],
                 ["reset", "--hard", "origin/master"],
             ],
