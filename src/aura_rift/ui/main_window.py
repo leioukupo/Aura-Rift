@@ -1469,8 +1469,9 @@ class VersionPage(QWidget):
         self.commit_table.setColumnWidth(0, 110)
         self.commit_table.setColumnWidth(2, 130)
         self.commit_table.setColumnWidth(3, 60)
-        self.commit_table.setColumnWidth(4, 100)
+        self.commit_table.setColumnWidth(4, 112)
         self.commit_table.verticalHeader().setVisible(False)
+        self.commit_table.verticalHeader().setDefaultSectionSize(44)
         self.commit_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.commit_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         root.addWidget(self.commit_table, 1)
@@ -1820,15 +1821,25 @@ class VersionPage(QWidget):
                 self.commit_table.setItem(row, 2, QTableWidgetItem(item.date))
                 self.commit_table.setItem(row, 3, QTableWidgetItem("是" if item.current else ""))
                 button = QPushButton("当前" if item.current else "切换")
-                button.setFixedHeight(30)
+                button.setFixedSize(72, 30)
                 button.setEnabled(not item.current)
                 button.clicked.connect(lambda _=False, rev=item.full_hash: self.checkout_revision(rev))
-                self.commit_table.setCellWidget(row, 4, button)
+                self.commit_table.setCellWidget(row, 4, self._commit_action_cell(button))
             self.commit_table.setUpdatesEnabled(True)
         except GitError as exc:
             self.remote_label.setText(f"远程地址：读取失败：{exc}")
             self.branch_label.setText("当前分支：读取失败")
             self.commit_label.setText("当前版本：读取失败")
+
+    def _commit_action_cell(self, button: QPushButton) -> QWidget:
+        cell = QWidget()
+        layout = QHBoxLayout(cell)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(0)
+        layout.addStretch(1)
+        layout.addWidget(button, 0, Qt.AlignCenter)
+        layout.addStretch(1)
+        return cell
 
     def refresh_extensions(self) -> None:
         custom_nodes = self.window.comfy_dir() / "custom_nodes"
