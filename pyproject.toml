@@ -26,6 +26,23 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Bundled 绘世 visuals/fonts extracted from the local Aki resources assembly.
+# Keep the nested head_images variants in wheels as well as the primary banner
+# and avatar files at resources/.
+aura_rift = [
+  "resources/*.jpg",
+  "resources/*.png",
+  "resources/*.ttf",
+  "resources/*.md",
+  "resources/*.json",
+  "resources/head_images/*.jpg",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

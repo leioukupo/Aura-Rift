@@ -35,13 +35,32 @@ def _parse_node_list(data: object, category: str = "") -> list[ExtensionEntry]:
         reference = node.get("reference", "") or ""
         author = node.get("author", "")
         files = node.get("files", [])
-        repo_url = files[0] if files else reference
+        # Manager registries normally use a list, while older/custom mirrors
+        # occasionally emit one repository URL as a scalar.  Indexing a
+        # scalar would keep only its first character and silently create a
+        # broken install target, so normalize both shapes explicitly.
+        if isinstance(files, str):
+            repo_url = files.strip() or reference
+        elif isinstance(files, (list, tuple)):
+            repo_url = files[0] if files else reference
+        else:
+            repo_url = reference
+        # Keep the model string-only even for partially malformed mirrors;
+        # search/installed-directory matching relies on `.lower()` later.
+        title = str(title or "")
+        reference = str(reference or "")
+        author = str(author or "")
+        repo_url = str(repo_url or "")
         if not repo_url:
             continue
         desc = node.get("description", "")
         if isinstance(desc, list):
             desc = " ".join(str(d) for d in desc)
         cat = node.get("category", category or "其他")
+        # Mirrors occasionally encode category as null/list metadata.  The
+        # search model is intentionally string-only, so normalize that field
+        # just like title/author above rather than failing on ``.lower()``.
+        cat = str(cat or category or "其他")
         entries.append(ExtensionEntry(
             title=title,
             reference=reference,
@@ -99,33 +118,45 @@ def load_local_extensions(manager_path: Path) -> list[ExtensionEntry]:
     return entries
 
 
-def fetch_remote_extensions(timeout: int = 30) -> list[ExtensionEntry]:
+def fetch_remote_extensions(timeout: int = 30, registry_url: str = REGISTRY_URL) -> list[ExtensionEntry]:
     """Fetch extensions from the online ComfyUI-Manager registry (fallback)."""
-    curl = subprocess.run(
-        ["curl", "-sL", "--max-time", str(timeout), REGISTRY_URL],
-        text=True, capture_output=True, timeout=timeout + 5,
-    )
-    if curl.returncode == 0 and curl.stdout.strip():
+    # ``curl`` is optional on desktop Linux (and absent on many test/CI
+    # images).  Missing executables, timeouts, and a malformed response must
+    # all fall through to urllib instead of aborting the registry page.
+    try:
+        curl = subprocess.run(
+            ["curl", "-sL", "--max-time", str(timeout), registry_url],
+            text=True, capture_output=True, timeout=timeout + 5,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        curl = None
+    if curl is not None and curl.returncode == 0 and curl.stdout.strip():
         try:
-            return _parse_node_list(json.loads(curl.stdout))
-        except json.JSONDecodeError:
+            parsed = _parse_node_list(json.loads(curl.stdout))
+            if parsed:
+                return parsed
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
     from urllib.request import urlopen
     try:
-        with urlopen(REGISTRY_URL, timeout=timeout) as resp:
+        with urlopen(registry_url, timeout=timeout) as resp:
             return _parse_node_list(json.loads(resp.read().decode()))
     except Exception:
         return []
 
 
-def get_extensions(comfy_path: Path, timeout: int = 30) -> list[ExtensionEntry]:
+def get_extensions(
+    comfy_path: Path,
+    timeout: int = 30,
+    registry_url: str | None = None,
+) -> list[ExtensionEntry]:
     """Get available extensions from local Manager DB, falling back to remote."""
     manager_path = comfy_path / "custom_nodes" / "ComfyUI-Manager"
     if manager_path.exists():
         local = load_local_extensions(manager_path)
         if local:
             return local
-    return fetch_remote_extensions(timeout)
+    return fetch_remote_extensions(timeout, registry_url or REGISTRY_URL)
 
 
 def mark_installed(entries: list[ExtensionEntry], custom_nodes_dir: Path) -> list[ExtensionEntry]:
@@ -135,7 +166,13 @@ def mark_installed(entries: list[ExtensionEntry], custom_nodes_dir: Path) -> lis
     installed_dirs: set[str] = set()
     for child in custom_nodes_dir.iterdir():
         if child.is_dir():
-            installed_dirs.add(child.name.lower())
+            # ComfyUI-Manager disables a node by appending ``.disabled`` to
+            # its directory name.  Treat that node as installed while keeping
+            # the enabled state available to callers through the suffix.
+            name = child.name.lower()
+            if name.endswith(".disabled"):
+                name = name[: -len(".disabled")]
+            installed_dirs.add(name)
     for entry in entries:
         dir_name = entry.repository_url.rstrip("/").split("/")[-1].removesuffix(".git").lower()
         entry.installed = dir_name in installed_dirs

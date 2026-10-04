@@ -27,6 +27,21 @@ class VenvManager(str, Enum):
     CONDA = "conda"
 
 
+def normalize_venv_manager(value: "VenvManager | str | object | None") -> VenvManager:
+    """Return a safe manager enum for config/UI values.
+
+    AppConfig migration normalizes persisted values, but service callers can
+    also construct an AppConfig directly (or pass a stale plugin value).  A
+    bad manager must not prevent the launcher from reporting dependency state.
+    """
+    if isinstance(value, VenvManager):
+        return value
+    try:
+        return VenvManager(str(value or VenvManager.VENV.value).strip().lower())
+    except (TypeError, ValueError):
+        return VenvManager.VENV
+
+
 MANAGER_LOCK_FILES: dict[VenvManager, str] = {
     VenvManager.POETRY: "poetry.lock",
     VenvManager.PDM: "pdm.lock",
@@ -96,7 +111,16 @@ def conda_env_name(comfy_path: Path) -> str:
         for line in env_file.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped.startswith("name:"):
-                return stripped.split(":", 1)[1].strip().strip("\"'\"'")
+                value = stripped.split(":", 1)[1].strip()
+                # ``environment.yml`` commonly annotates the name inline
+                # (``name: comfyui  # local CUDA env``).  Passing the comment
+                # through to ``conda run -n`` makes the later launch lookup
+                # miss the environment that was just created.  Keep this
+                # deliberately small and dependency-free; a full YAML parse
+                # is unnecessary for this scalar field.
+                if "#" in value:
+                    value = value.split("#", 1)[0].rstrip()
+                return value.strip("\"'\"")
     except Exception:
         pass
     return ""
@@ -178,6 +202,55 @@ def venv_pip(comfy_path: Path) -> Path:
     return venv_dir(comfy_path) / "bin" / "pip"
 
 
+def _manager_python_path(comfy_path: Path, manager: VenvManager) -> Path | str:
+    """Resolve interpreters created outside ``<project>/.venv``.
+
+    Poetry commonly stores environments in its global cache and PDM can do
+    the same when ``python.use_venv`` is disabled.  Falling straight back to
+    the launcher's interpreter in those cases makes a successful
+    ``poetry install``/``pdm install`` unusable at run time.  Query the
+    manager only when it is selected; failures remain non-fatal and callers
+    can still use the normal project/system fallback.
+    """
+    if manager not in {VenvManager.POETRY, VenvManager.PDM}:
+        return ""
+    executable = shutil.which(manager.value)
+    if not executable:
+        return ""
+    command = (
+        [executable, "env", "info", "--path"]
+        if manager == VenvManager.POETRY
+        else [executable, "info", "--python"]
+    )
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=str(comfy_path),
+            text=True,
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    lines = [line.strip().strip('"') for line in (proc.stdout or "").splitlines() if line.strip()]
+    # Manager output may include a short label or warning.  Prefer the last
+    # path-like line, then try every line in reverse for compatibility with
+    # localized wrappers.
+    for raw in reversed(lines):
+        value = raw
+        if manager == VenvManager.PDM and ": " in value and not value.startswith(("/", "\\")):
+            value = value.split(": ", 1)[1].strip().strip('"')
+        candidate = Path(value).expanduser()
+        if candidate.is_dir():
+            candidate = candidate / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        if candidate.is_file():
+            return candidate
+    return ""
+
+
 def resolve_python(
     comfy_path: Path,
     override: str = "",
@@ -188,13 +261,24 @@ def resolve_python(
         if str(resolved):
             return resolved
         # invalid override — fall through to discovery below
-    if isinstance(manager, str):
-        manager = VenvManager(manager)
+    manager = normalize_venv_manager(manager)
     if manager == VenvManager.CONDA:
-        conda_py = conda_python_path(comfy_path)
-        if conda_py:
-            return conda_py
+        # Fresh installs are assembled before clone, so they use the
+        # deterministic project-directory name even when the cloned tree
+        # later contains an environment.yml with a different name.  Probe
+        # both names in order; this also supports an existing named env.
+        names: list[str] = []
+        for name in (conda_env_name(comfy_path), comfy_path.name):
+            if name and name not in names:
+                names.append(name)
+        for name in names:
+            conda_py = conda_python_path(comfy_path, name)
+            if conda_py:
+                return conda_py
         # fall through to .venv or system python
+    manager_py = _manager_python_path(comfy_path, manager)
+    if str(manager_py):
+        return manager_py
     candidate = venv_python(comfy_path)
     if candidate.exists():
         return candidate
@@ -283,8 +367,7 @@ def venv_manager_status(comfy_path: Path, preferred: "VenvManager | str | None" 
     """Short human-readable string describing the active venv manager and its detection."""
     if preferred is None:
         preferred = autodetect_venv_manager(comfy_path)
-    if isinstance(preferred, str):
-        preferred = VenvManager(preferred)
+    preferred = normalize_venv_manager(preferred)
     managers = detect_venv_managers(comfy_path)
     info = managers.get(preferred, VenvManagerInfo(manager=preferred))
     lock_name = MANAGER_LOCK_FILES.get(preferred, "")
@@ -303,17 +386,45 @@ def dependency_status(
     python_override: str = "",
     venv_manager: "VenvManager | str | None" = None,
 ) -> dict[str, str]:
-    mgr = autodetect_venv_manager(comfy_path) if venv_manager is None else VenvManager(venv_manager)
+    mgr = autodetect_venv_manager(comfy_path) if venv_manager is None else normalize_venv_manager(venv_manager)
     python = resolve_python(comfy_path, python_override, mgr)
+    # ``.venv`` is only the storage location for the stdlib/uv managers.
+    # Poetry and PDM may keep their environments in a global cache, while
+    # Conda uses a named environment.  Reporting those as "未创建" made a
+    # healthy installation look broken on the maintenance page, even though
+    # ``resolve_python`` had already found the interpreter that ComfyUI will
+    # use.  Keep the historic keys for compatibility, but derive their state
+    # from the selected manager as well.
+    if mgr in {VenvManager.POETRY, VenvManager.PDM}:
+        environment_exists = bool(_manager_python_path(comfy_path, mgr))
+        pip_exists = environment_exists
+    elif mgr == VenvManager.CONDA:
+        environment_exists = bool(
+            conda_python_path(comfy_path, conda_env_name(comfy_path) or comfy_path.name)
+        )
+        pip_exists = environment_exists
+    else:
+        environment_exists = venv_python(comfy_path).exists()
+        pip_exists = venv_pip(comfy_path).exists()
     return {
         "ComfyUI": "已选择" if (comfy_path / "main.py").exists() else "未安装或路径错误",
         "Python": str(python),
-        "venv": "存在" if venv_python(comfy_path).exists() else "未创建",
-        "pip": "存在" if venv_pip(comfy_path).exists() else "未创建",
+        "venv": "存在" if environment_exists else "未创建",
+        "pip": "存在" if pip_exists else "未创建",
         "git": shutil.which("git") or "未找到",
         "requirements.txt": "存在" if requirements_file(comfy_path).exists() else "未找到",
         "环境管理器": venv_manager_status(comfy_path, mgr),
     }
+
+
+__all__ = [
+    "DependencyCheck", "MANAGER_BINARIES", "MANAGER_LABELS", "MANAGER_LOCK_FILES",
+    "RequirementRef", "TorchInfo", "VenvManager", "VenvManagerInfo",
+    "autodetect_venv_manager", "check_dependencies", "conda_env_name",
+    "dependency_status", "detect_gpu", "detect_venv_managers", "inspect_torch",
+    "normalize_venv_manager", "requirements_file", "resolve_python", "venv_pip",
+    "venv_python",
+]
 
 
 
@@ -340,7 +451,11 @@ class DependencyCheck:
 
     @property
     def ok(self) -> bool:
-        return not self.missing_files
+        # ``check_dependencies`` uses ``installed_count == -1`` for a probe
+        # that could not run (invalid interpreter, timeout, malformed JSON,
+        # etc.).  An empty ``missing_files`` mapping must not turn that
+        # unknown result into a false "all dependencies installed" report.
+        return self.installed_count >= 0 and not self.missing_files
 
     @property
     def total_missing(self) -> int:
@@ -355,16 +470,24 @@ class DependencyCheck:
 
 def iter_requirements_files(comfy_path: Path) -> list[Path]:
     """Collect ComfyUI's own requirements.txt and every custom_nodes one."""
+    root = comfy_path.expanduser().resolve()
     files: list[Path] = []
     main = comfy_path / "requirements.txt"
-    if main.exists():
+    # Requirement files are later passed as argv to the selected Python
+    # interpreter.  Keep the scanner confined to the ComfyUI tree and avoid
+    # following a symlink supplied by an untrusted extension directory.
+    if main.is_file() and not main.is_symlink():
         files.append(main)
     custom_nodes = comfy_path / "custom_nodes"
     if custom_nodes.is_dir():
         for child in sorted(custom_nodes.iterdir(), key=lambda p: p.name.lower()):
-            if child.is_dir():
+            if child.is_dir() and not child.is_symlink():
                 req = child / "requirements.txt"
-                if req.exists():
+                try:
+                    inside = req.resolve().is_relative_to(root)
+                except (OSError, RuntimeError, ValueError, AttributeError):
+                    inside = False
+                if req.is_file() and not req.is_symlink() and inside:
                     files.append(req)
     return files
 

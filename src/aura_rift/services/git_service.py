@@ -68,8 +68,12 @@ def _run_git(path: Path, args: list[str], timeout: int = 30) -> str:
     return proc.stdout.strip()
 
 
-def git_command_args(args: list[str], github_proxy: str = "") -> list[str]:
-    """Build a git command, optionally using a temporary GitHub mirror rewrite."""
+def git_command_args(
+    args: list[str],
+    github_proxy: str = "",
+    mirror_rules: list[tuple[str, str]] | None = None,
+) -> list[str]:
+    """Build a git command with temporary proxy and catalog mirror rewrites."""
     command = ["git", "-c", "color.ui=always"]
     proxy = github_proxy.strip()
     if proxy:
@@ -80,6 +84,13 @@ def git_command_args(args: list[str], github_proxy: str = "") -> list[str]:
             "-c",
             f"url.{base}.insteadOf=git@github.com:",
         ])
+    for source, destination in mirror_rules or []:
+        source = str(source).strip()
+        destination = str(destination).strip().rstrip("/")
+        if not source or not destination:
+            continue
+        base = destination + "/"
+        command.extend(["-c", f"url.{base}.insteadOf={source}"])
     command.extend(args)
     return command
 

@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
+from typing import Callable
 
 from PySide6.QtCore import QObject, QThread, Signal
 
@@ -16,6 +17,14 @@ class CommandSpec:
     cwd: Path | None = None
     env: dict[str, str] = field(default_factory=dict)
     title: str = ""
+    # Optional execution hooks are intentionally at the end so existing
+    # callers that construct CommandSpec positionally keep the same API.
+    # ``condition`` is evaluated after preceding commands complete; ``expand``
+    # can replace a placeholder with commands that depend on files created by
+    # those preceding commands (for example a freshly cloned uv.lock).
+    condition: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
+    expand: Callable[[], list["CommandSpec"]] | None = field(default=None, repr=False, compare=False)
+    replace_remaining: bool = field(default=False, repr=False, compare=False)
 
 
 class CommandWorker(QObject):
@@ -35,10 +44,35 @@ class CommandWorker(QObject):
 
     def run(self) -> None:
         try:
-            for command in self.commands:
+            # Work on a private queue: an expansion stage may insert commands
+            # after a clone has completed without mutating the caller's list
+            # (which is useful to UI code retaining it for display/tests).
+            queue = list(self.commands)
+            index = 0
+            while index < len(queue):
+                command = queue[index]
                 if self.stop_event.is_set():
                     self.finished.emit(False, "任务已取消")
                     return
+                if command.expand is not None:
+                    try:
+                        expanded = list(command.expand())
+                    except Exception as exc:
+                        self.finished.emit(False, f"无法准备后续命令：{exc}")
+                        return
+                    end = len(queue) if command.replace_remaining else index + 1
+                    queue[index:end] = expanded
+                    # Re-evaluate the first expanded command at this index.
+                    continue
+                if command.condition is not None:
+                    try:
+                        should_run = bool(command.condition())
+                    except Exception as exc:
+                        self.finished.emit(False, f"无法检查命令条件：{exc}")
+                        return
+                    if not should_run:
+                        index += 1
+                        continue
                 if command.title:
                     self.output.emit(f"\n\033[1;36m{command.title}\033[0m\n")
                 rendered_command = " ".join(shlex.quote(part) for part in command.args)
@@ -71,6 +105,7 @@ class CommandWorker(QObject):
                 if code != 0:
                     self.finished.emit(False, f"命令退出码 {code}")
                     return
+                index += 1
             self.finished.emit(True, "任务完成")
         except Exception as exc:
             self.finished.emit(False, str(exc))
