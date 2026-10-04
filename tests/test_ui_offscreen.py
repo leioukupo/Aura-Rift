@@ -8,9 +8,10 @@ from pathlib import Path
 # are sufficient on a headless Linux runner.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtWidgets import QApplication, QScrollBar
 
+from aura_rift.services.registry import ExtensionEntry
 from aura_rift.services.environment import TorchInfo
 from aura_rift.ui import main_window as window_module
 from aura_rift.ui.main_window import MainWindow
@@ -130,5 +131,121 @@ def test_console_compatibility_api(tmp_path: Path, monkeypatch) -> None:
     assert console.status.text() == "运行中"
     console.clear_output()
     assert console.output.toPlainText() == ""
+    window.close()
+    app.processEvents()
+
+
+def test_version_tables_reflow_actions_after_large_to_compact_resize(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Version actions must remain reachable after a DPI/window-size change.
+
+    The launcher is commonly opened on a large monitor and then moved to a
+    laptop or a fractional-DPI display.  QTableWidget remembers interactive
+    column widths for hidden tabs, so merely checking the initial compact
+    geometry misses the regression: a table can retain its 1900px geometry
+    after the window has shrunk and place its action cell outside the viewport.
+    Seed every version tab at the wide size, shrink while the install tab is
+    active, then inspect every visible action widget after switching tabs.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(
+        window_module.environment,
+        "dependency_status",
+        lambda *_args, **_kwargs: {"Python": "测试环境", "依赖": "未检查"},
+    )
+    monkeypatch.setattr(
+        window_module.environment,
+        "inspect_torch",
+        lambda *_args, **_kwargs: TorchInfo(False, detail="测试环境"),
+    )
+    monkeypatch.setattr(window_module.environment, "detect_gpu", lambda: ["测试 GPU"])
+
+    app = _application()
+    window = MainWindow()
+    window.show()
+    app.processEvents()
+
+    # Keep all probes local and deterministic.  Expert mode intentionally
+    # exposes the branch action as well, exercising the densest action cell.
+    comfy = tmp_path / "ComfyUI"
+    custom_nodes = comfy / "custom_nodes"
+    (custom_nodes / "NodeAlpha").mkdir(parents=True)
+    (custom_nodes / "NodeBeta").mkdir(parents=True)
+    window.config.comfy_path = str(comfy)
+    window.config.expert_mode = True
+
+    page = window.version_page
+    window.show_page("versions")
+    page.tabs.setCurrentIndex(0)
+    page._populate_catalog_versions(
+        [
+            {"commit": "abcdef0123456789", "description": "wide row", "date": "2026-01-01"},
+            {"commit": "1234567890abcdef", "description": "another row", "date": "2026-01-02"},
+        ]
+    )
+
+    page.tabs.setCurrentIndex(1)
+    page.refresh_extensions()
+    install_entry = ExtensionEntry(
+        title="Responsive Node",
+        reference="responsive-node",
+        author="Aura-Rift",
+        repository_url="https://example.invalid/responsive-node.git",
+        description="offline test entry",
+    )
+    # Supplying a non-empty catalog keeps refresh_install_tab offline and
+    # avoids its asynchronous remote-registry fallback.
+    page.all_extensions = [install_entry]
+    page.tabs.setCurrentIndex(2)
+    page._populate_extension_list([install_entry])
+    page._loaded_tabs = {0, 1, 2}
+
+    # Establish the wide layout for every tab before shrinking.  This is the
+    # sequence that exposed the stale hidden-table geometry in the old UI.
+    window.resize(2107, 1317)
+    for index in range(3):
+        page.tabs.setCurrentIndex(index)
+        app.processEvents()
+
+    window.resize(960, 640)
+    app.processEvents()
+
+    def assert_actions_fit(table, action_column: int) -> None:
+        table.doItemsLayout()
+        app.processEvents()
+        viewport = table.viewport()
+        assert table.width() <= page.tabs.width()
+        assert table.horizontalHeader().length() <= viewport.width()
+        assert not table.horizontalScrollBar().isVisible()
+        assert table.rowCount() > 0
+        for row in range(table.rowCount()):
+            index = table.model().index(row, action_column)
+            cell = table.visualRect(index)
+            host = table.cellWidget(row, action_column)
+            assert host is not None
+            host_rect = QRect(host.mapTo(viewport, QPoint(0, 0)), host.size())
+            assert cell.contains(host_rect.topLeft())
+            assert cell.contains(host_rect.bottomRight())
+            for button in host.findChildren(window_module.QPushButton):
+                if not button.isVisible():
+                    continue
+                button_rect = QRect(button.mapTo(viewport, QPoint(0, 0)), button.size())
+                assert host_rect.contains(button_rect.topLeft())
+                assert host_rect.contains(button_rect.bottomRight())
+                assert cell.contains(button_rect.topLeft())
+                assert cell.contains(button_rect.bottomRight())
+
+    # Switching to a hidden tab after the resize must trigger its reflow too.
+    for index, table, action_column in (
+        (0, page.commit_table, 4),
+        (1, page.extension_table, 5),
+        (2, page.extension_install_list, 4),
+    ):
+        page.tabs.setCurrentIndex(index)
+        app.processEvents()
+        assert_actions_fit(table, action_column)
+
     window.close()
     app.processEvents()

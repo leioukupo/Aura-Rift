@@ -466,6 +466,15 @@ QPushButton#flat {
 }
 QPushButton#flat:hover { background: $surface_hover; color: $text; }
 
+/* Buttons embedded in version/extension table cells need to remain usable
+   when the launcher is scaled down.  Their labels are deliberately short,
+   so a smaller horizontal inset gives the table's responsive layout room to
+   wrap actions onto a second row instead of clipping them at the cell edge. */
+QPushButton[actionButton="true"] {
+    padding: 4px 7px;
+    min-height: 14px;
+}
+
 /* Console and data views */
 QPlainTextEdit#console {
     background: $console;

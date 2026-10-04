@@ -7,7 +7,7 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QSize, Qt, Signal, QUrl
+from PySide6.QtCore import QEvent, QTimer, QSize, Qt, Signal, QUrl
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont, QIcon, QPixmap, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -2116,6 +2116,12 @@ class VersionPage(QWidget):
         self._install_loading = False
         self._version_tabs_index = 0
         self._installed_extension_rows: list[Path] = []
+        # Table columns and embedded action buttons are resized as the page
+        # changes width.  Keeping the pending flag local to the page avoids a
+        # resize storm while Qt is still relaying out the stacked widget.
+        self._responsive_layout_pending = False
+        self._responsive_delayed_pending = False
+        self._extension_action_cells: list[tuple[QWidget, list[QPushButton]]] = []
         self.extensions_loaded.connect(self._on_extensions_loaded)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2174,9 +2180,275 @@ class VersionPage(QWidget):
         header_layout.insertStretch(1, 1)
         tabs.currentChanged.connect(self.on_version_tab_changed)
         layout.addWidget(tabs, 1)
+        # QTableWidget children can settle one layout pass after the page
+        # itself.  Observe all three tables so a DPI/window change is
+        # recalculated from their final viewport, including hidden tabs.
+        for table in (self.commit_table, self.extension_table, self.extension_install_list):
+            table.installEventFilter(self)
+        self._queue_responsive_layout()
+
+    def resizeEvent(self, event) -> None:
+        """Keep version tables usable at small windows and high DPI scales.
+
+        ``QHeaderView.Interactive`` remembers widths from the previous window
+        size.  Without rebalancing those widths, shrinking the frameless
+        window leaves the action column outside the viewport (or shows a
+        horizontal scrollbar).  The page owns the policy for all three
+        tables, so a single deferred pass is enough after each resize.
+        """
+        super().resizeEvent(event)
+        self._queue_responsive_layout()
+
+    def _queue_responsive_layout(self) -> None:
+        if self._responsive_layout_pending:
+            return
+        self._responsive_layout_pending = True
+        QTimer.singleShot(0, self._apply_responsive_layout)
+
+    def eventFilter(self, watched, event) -> bool:
+        # A table resize is followed by a second geometry pass for its
+        # cellWidgets.  Listening to the action cells catches that latter
+        # pass, which is the point at which their real width is available.
+        tables = tuple(
+            table for table in (
+                getattr(self, "commit_table", None),
+                getattr(self, "extension_table", None),
+                getattr(self, "extension_install_list", None),
+            ) if table is not None
+        )
+        is_action_cell = any(
+            watched is cell for cell, _buttons in getattr(self, "_extension_action_cells", [])
+        )
+        if event.type() == QEvent.Resize and (watched in tables or is_action_cell):
+            self._queue_responsive_layout()
+            # QTableWidget performs one more child-geometry pass after the
+            # cell receives its first resize event.  A short deferred pass
+            # reads the final width, avoiding a stale action column count at
+            # fractional/high-DPI scales.
+            if is_action_cell:
+                if not self._responsive_delayed_pending:
+                    self._responsive_delayed_pending = True
+                    QTimer.singleShot(30, self._responsive_delayed_pass)
+        return super().eventFilter(watched, event)
+
+    def _responsive_delayed_pass(self) -> None:
+        self._responsive_delayed_pending = False
+        self._queue_responsive_layout()
+
+    @staticmethod
+    def _responsive_widths(available: int, minimums: list[int], ratios: list[float]) -> list[int]:
+        """Return integer column widths that never exceed *available*.
+
+        The normal launcher width has ample room for the preferred ratios,
+        while the compact branch proportionally relaxes the minimums.  The
+        final correction keeps rounding errors from reintroducing a one-pixel
+        horizontal scrollbar.
+        """
+        count = len(minimums)
+        if count == 0:
+            return []
+        available = max(count, int(available))
+        mins = [max(1, int(value)) for value in minimums]
+        minimum_total = sum(mins)
+        if available < minimum_total:
+            # A very narrow/high-DPI window can be smaller than the semantic
+            # minimums.  Preserve relative proportions while guaranteeing at
+            # least one pixel for every column; cell contents then elide or
+            # wrap rather than forcing the entire table wider than the page.
+            scale = available / float(minimum_total)
+            widths = [max(1, int(value * scale)) for value in mins]
+        else:
+            extra = available - minimum_total
+            weights = [max(0.0, float(value)) for value in ratios]
+            weight_total = sum(weights) or float(count)
+            widths = [base + int(extra * (weight / weight_total)) for base, weight in zip(mins, weights)]
+        difference = available - sum(widths)
+        # Add/subtract rounding residue from the largest column.  Never let a
+        # column become negative when compact mode is active.
+        pivot = max(range(count), key=lambda index: widths[index])
+        widths[pivot] = max(1, widths[pivot] + difference)
+        return widths
+
+    @staticmethod
+    def _table_viewport_width(table: QTableWidget) -> int:
+        viewport_width = table.viewport().width()
+        if viewport_width <= 0:
+            viewport_width = table.width() - table.verticalHeader().width()
+        return max(1, viewport_width)
+
+    @staticmethod
+    def _set_fixed_table_widths(table: QTableWidget, widths: list[int]) -> None:
+        header = table.horizontalHeader()
+        for index in range(table.columnCount()):
+            header.setSectionResizeMode(index, QHeaderView.Fixed)
+        for index, width in enumerate(widths):
+            table.setColumnWidth(index, max(1, int(width)))
+
+    def _apply_responsive_layout(self) -> None:
+        self._responsive_layout_pending = False
+        # Hidden tabs can report a zero viewport while Qt is constructing the
+        # page.  They will be handled by the next resize/tab-change pass.
+        if hasattr(self, "commit_table"):
+            table = self.commit_table
+            width = self._table_viewport_width(table)
+            columns = self._responsive_widths(
+                width,
+                [74, 80, 76, 44, 72],
+                [0.14, 0.48, 0.16, 0.08, 0.14],
+            )
+            self._set_fixed_table_widths(table, columns)
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        if hasattr(self, "extension_table"):
+            table = self.extension_table
+            width = self._table_viewport_width(table)
+            # Reserve enough space for a compact two-column action grid.  At
+            # wider sizes the grid naturally expands to one row.
+            action_width = min(max(132, int(width * 0.23)), 300)
+            remaining = max(5, width - action_width)
+            columns = self._responsive_widths(
+                remaining,
+                [78, 86, 58, 58, 78],
+                [0.18, 0.38, 0.14, 0.12, 0.18],
+            ) + [action_width]
+            self._set_fixed_table_widths(table, columns)
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self._reflow_extension_actions()
+            # Reposition QTableWidget cell widgets immediately after changing
+            # wrapped-row heights.  ``setRowHeight`` otherwise leaves the
+            # widget geometry at its previous (pre-wrap) y coordinate until a
+            # later paint event, which is visible when switching to a hidden
+            # tab immediately after a resize.
+            table.updateGeometries()
+            table.doItemsLayout()
+        if hasattr(self, "extension_install_list"):
+            table = self.extension_install_list
+            width = self._table_viewport_width(table)
+            action_width = min(max(82, int(width * 0.14)), 132)
+            remaining = max(5, width - action_width)
+            columns = self._responsive_widths(
+                remaining,
+                [82, 100, 76, 62],
+                [0.18, 0.46, 0.20, 0.16],
+            ) + [action_width]
+            self._set_fixed_table_widths(table, columns)
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+    @staticmethod
+    def _action_columns(width: int, count: int, preferred_width: int = 64) -> int:
+        if count <= 1:
+            return 1
+        # Keep a useful label width instead of packing five tiny buttons into
+        # one row.  The target is based on the current style's size hint plus
+        # a small gutter; wrapping to a second row is preferable to an ellipsis
+        # or a button that appears clipped.
+        # The deferred resize pass below accounts for styles with a larger
+        # font and recomputes the row height from each button's size hint.
+        target = max(1, int(preferred_width))
+        return max(1, min(count, max(1, (max(1, width) + 4) // target)))
+
+    @staticmethod
+    def _action_row_height(buttons: list[QPushButton], rows: int, minimum: int = 44) -> int:
+        """Size wrapped rows from the current font/style, not a pixel guess."""
+        button_height = max((button.sizeHint().height() for button in buttons), default=24)
+        return max(int(minimum), int(rows) * button_height + (int(rows) + 1) * 4)
+
+    def _layout_extension_action_cell(
+        self,
+        cell: QWidget,
+        buttons: list[QPushButton],
+        *,
+        table_width: int = 0,
+    ) -> None:
+        """Arrange extension actions in an elastic grid.
+
+        A horizontal row is ideal at the reference width, but it cannot fit
+        five actions once the launcher is scaled to a compact laptop window.
+        The grid therefore changes column count from one to ``n`` based on
+        the actual cell width.  Buttons use an ``Ignored`` horizontal policy,
+        allowing each grid column to absorb the available width without
+        pushing the table beyond its viewport.
+        """
+        # ``isVisible()``/``isHidden()`` also reflect the parent page's
+        # visibility, so they are false while this tab is being constructed.
+        # The explicit property records the intended visibility instead.
+        for button in buttons:
+            if button.property("_expert_action"):
+                expert_visible = bool(self.window.config.expert_mode)
+                button.setProperty("_action_visible", expert_visible)
+                button.setVisible(expert_visible)
+        visible = [button for button in buttons if button.property("_action_visible") is not False]
+        if not visible:
+            return
+        # Prefer the freshly computed table section width.  During a resize
+        # the embedded widget can still report its previous geometry for one
+        # event cycle; using that stale width would undo the new wrap count.
+        width = int(table_width or cell.width() or 0)
+        preferred_width = max(
+            64,
+            max((button.sizeHint().width() + 12 for button in visible), default=64),
+        )
+        columns = self._action_columns(width, len(visible), preferred_width)
+        layout = cell.layout()
+        if not isinstance(layout, QGridLayout):
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(cell)
+        for column in range(layout.columnCount()):
+            layout.setColumnStretch(column, 0)
+        for column in range(columns):
+            layout.setColumnStretch(column, 1)
+        for index, button in enumerate(visible):
+            layout.addWidget(button, index // columns, index % columns)
+        cell.setProperty("_action_columns", columns)
+        rows = (len(visible) + columns - 1) // columns
+        # The table's default row is 46px; grow it only when actions wrapped.
+        row_height = self._action_row_height(visible, rows)
+        if hasattr(self, "extension_table"):
+            row = self.extension_table.indexAt(cell.pos()).row()
+            if row >= 0:
+                self.extension_table.setRowHeight(row, row_height)
+
+    def _reflow_extension_actions(self) -> None:
+        if not self._extension_action_cells or not hasattr(self, "extension_table"):
+            return
+        table = self.extension_table
+        fallback_width = table.columnWidth(5) if table.columnCount() > 5 else 0
+        for row, (cell, buttons) in enumerate(self._extension_action_cells):
+            for button in buttons:
+                if button.property("_expert_action"):
+                    expert_visible = bool(self.window.config.expert_mode)
+                    button.setProperty("_action_visible", expert_visible)
+                    button.setVisible(expert_visible)
+            visible = [button for button in buttons if button.property("_action_visible") is not False]
+            if not visible:
+                continue
+            # During a tab switch the embedded widget may still report its
+            # previous (wide-tab) width for one event cycle.  The column
+            # section is authoritative and already reflects the final table
+            # viewport, so use it to choose the wrap count.
+            width = max(1, table.columnWidth(5) - 4) or fallback_width
+            preferred_width = max(
+                64,
+                max((button.sizeHint().width() + 12 for button in visible), default=64),
+            )
+            columns = self._action_columns(width, len(visible), preferred_width)
+            if cell.property("_action_columns") == columns:
+                # Width may have changed without changing the number of
+                # columns; the row height still needs a cheap refresh.
+                rows = (len(visible) + columns - 1) // columns
+            else:
+                self._layout_extension_action_cell(cell, buttons, table_width=width)
+                rows = (len(visible) + columns - 1) // columns
+            # The default table row is 46px.  Add enough height for wrapped
+            # rows while retaining the reference launcher's compact rhythm.
+            table.setRowHeight(row, self._action_row_height(visible, rows))
 
     def on_version_tab_changed(self, index: int) -> None:
         self._version_tabs_index = index
+        self._queue_responsive_layout()
         if 0 <= index < len(self.version_tab_titles):
             self.version_header_title.setText(self.version_tab_titles[index])
         # Lazy: only refresh the tab if it hasn't been loaded yet
@@ -2292,6 +2564,7 @@ class VersionPage(QWidget):
         self.extension_table.verticalHeader().setDefaultSectionSize(46)
         self.extension_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.extension_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.extension_table.installEventFilter(self)
         root.addWidget(self.extension_table, 1)
         return page
 
@@ -2374,7 +2647,10 @@ class VersionPage(QWidget):
         self.page_last.clicked.connect(lambda: self.go_to_page(-1))
         self.page_label = label("", 12)
         self.page_spin = QSpinBox()
-        self.page_spin.setFixedWidth(70)
+        # Let the pager absorb fractional-DPI font metrics instead of
+        # clipping the spinbox arrows/value at a fixed logical width.
+        self.page_spin.setMinimumWidth(0)
+        self.page_spin.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.page_spin.setMinimum(1)
         self.page_spin.valueChanged.connect(self._on_page_spin_changed)
         pager.addStretch(1)
@@ -2449,11 +2725,14 @@ class VersionPage(QWidget):
             self.extension_install_list.setItem(row, 3, QTableWidgetItem("已安装" if entry.installed else "未安装"))
             button_text = "已安装" if entry.installed else "安装"
             button = QPushButton(button_text)
+            button.setProperty("actionButton", True)
+            button.setMinimumSize(0, 0)
+            button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             button.setEnabled(not entry.installed)
-            button.setFixedHeight(30)
             if not entry.installed:
                 button.clicked.connect(lambda _=False, url=entry.repository_url: self._install_from_url(url))
             self.extension_install_list.setCellWidget(row, 4, button)
+            self.extension_install_list.setRowHeight(row, max(72, button.sizeHint().height() + 8))
         self.extension_install_list.setUpdatesEnabled(True)
 
         page_count = last_page + 1
@@ -2596,11 +2875,14 @@ class VersionPage(QWidget):
             self.commit_table.setItem(row, 2, QTableWidgetItem(date))
             self.commit_table.setItem(row, 3, QTableWidgetItem("是" if is_current else ""))
             button = QPushButton("当前" if is_current else "切换")
-            button.setFixedSize(72, 30)
+            button.setProperty("actionButton", True)
+            button.setMinimumSize(0, 0)
+            button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             button.setEnabled(bool(revision) and not is_current and (self.window.comfy_dir() / ".git").exists())
             if revision:
                 button.clicked.connect(lambda _=False, rev=revision: self.checkout_revision(rev))
             self.commit_table.setCellWidget(row, 4, self._commit_action_cell(button))
+            self.commit_table.setRowHeight(row, max(44, button.sizeHint().height() + 8))
         self.commit_table.setUpdatesEnabled(True)
 
     def refresh_core(self) -> None:
@@ -2657,10 +2939,13 @@ class VersionPage(QWidget):
                 self.commit_table.setItem(row, 2, QTableWidgetItem(item.date))
                 self.commit_table.setItem(row, 3, QTableWidgetItem("是" if item.current else ""))
                 button = QPushButton("当前" if item.current else "切换")
-                button.setFixedSize(72, 30)
+                button.setProperty("actionButton", True)
+                button.setMinimumSize(0, 0)
+                button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
                 button.setEnabled(not item.current)
                 button.clicked.connect(lambda _=False, rev=item.full_hash: self.checkout_revision(rev))
                 self.commit_table.setCellWidget(row, 4, self._commit_action_cell(button))
+                self.commit_table.setRowHeight(row, max(44, button.sizeHint().height() + 8))
             self.commit_table.setUpdatesEnabled(True)
         except GitError as exc:
             self.remote_label.setText(f"远程地址：读取失败：{exc}")
@@ -2669,12 +2954,14 @@ class VersionPage(QWidget):
 
     def _commit_action_cell(self, button: QPushButton) -> QWidget:
         cell = QWidget()
+        cell.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QHBoxLayout(cell)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(0)
-        layout.addStretch(1)
-        layout.addWidget(button, 0, Qt.AlignCenter)
-        layout.addStretch(1)
+        # Let the action fill the elastic cell.  Centering it between two
+        # stretch items would divide the narrow column into thirds and make
+        # the label itself narrower than its size hint.
+        layout.addWidget(button, 1)
         return cell
 
     def refresh_extensions(self) -> None:
@@ -2685,6 +2972,8 @@ class VersionPage(QWidget):
         if not custom_nodes.exists():
             self.extension_table.setRowCount(0)
             self._installed_extension_rows = []
+            self._extension_action_cells = []
+            self._queue_responsive_layout()
             return
         dirs = sorted((p for p in custom_nodes.iterdir() if p.is_dir()), key=lambda p: p.name.lower())
         query = self.installed_extension_search.text().strip().lower() if hasattr(self, "installed_extension_search") else ""
@@ -2712,6 +3001,7 @@ class VersionPage(QWidget):
             rows.append((child, remote, branch, commit, status, str(child), is_git))
         self._installed_extension_rows = [row[0] for row in rows]
         self.extension_table.setUpdatesEnabled(False)
+        self._extension_action_cells = []
         self.extension_table.setRowCount(len(rows))
         for row, (child, remote, branch, commit, status, _path, is_git) in enumerate(rows):
             name_item = QTableWidgetItem(child.name)
@@ -2723,39 +3013,57 @@ class VersionPage(QWidget):
             self.extension_table.setItem(row, 4, QTableWidgetItem(status))
 
             actions = QWidget()
-            action_layout = QHBoxLayout(actions)
-            action_layout.setContentsMargins(0, 4, 0, 4)
-            action_layout.setSpacing(6)
+            actions.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            actions.installEventFilter(self)
+            action_layout = QGridLayout(actions)
+            action_layout.setContentsMargins(2, 2, 2, 2)
+            action_layout.setHorizontalSpacing(4)
+            action_layout.setVerticalSpacing(4)
             update_btn = QPushButton("更新")
-            update_btn.setFixedHeight(30)
+            update_btn.setProperty("actionButton", True)
+            update_btn.setMinimumSize(0, 0)
+            update_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             update_btn.setEnabled(is_git)
             update_btn.clicked.connect(lambda _=False, p=child: self.update_extension_path(p))
             open_btn = QPushButton("打开")
-            open_btn.setFixedHeight(30)
+            open_btn.setProperty("actionButton", True)
+            open_btn.setMinimumSize(0, 0)
+            open_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             open_btn.clicked.connect(lambda _=False, p=child: self.open_extension_path(p))
             uninstall_btn = QPushButton("卸载")
+            uninstall_btn.setProperty("actionButton", True)
+            uninstall_btn.setMinimumSize(0, 0)
+            uninstall_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             uninstall_btn.setObjectName("danger")
-            uninstall_btn.setFixedHeight(30)
             uninstall_btn.clicked.connect(lambda _=False, p=child: self._uninstall_extension(p))
             toggle_btn = QPushButton("禁用" if not child.name.endswith(".disabled") else "启用")
-            toggle_btn.setFixedHeight(30)
+            toggle_btn.setProperty("actionButton", True)
+            toggle_btn.setMinimumSize(0, 0)
+            toggle_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             toggle_btn.clicked.connect(lambda _=False, p=child: self.toggle_extension(p))
             branch_btn = QPushButton("分支")
-            branch_btn.setFixedHeight(30)
+            branch_btn.setProperty("actionButton", True)
+            branch_btn.setMinimumSize(0, 0)
+            branch_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             branch_btn.setEnabled(is_git)
             # Branch switching is an expert-mode affordance, matching the
             # core version tab where the branch row is hidden for beginners.
             # Keep the action wired for integrations, but do not expose it in
             # the default (beginner) workflow.
             branch_btn.setVisible(bool(self.window.config.expert_mode))
+            branch_btn.setProperty("_expert_action", True)
             branch_btn.clicked.connect(lambda _=False, p=child: self.switch_extension_branch(p))
-            action_layout.insertWidget(0, toggle_btn)
-            action_layout.insertWidget(1, branch_btn)
-            action_layout.addWidget(update_btn)
-            action_layout.addWidget(open_btn)
-            action_layout.addWidget(uninstall_btn)
+            buttons = [toggle_btn, branch_btn, update_btn, open_btn, uninstall_btn]
+            for action_button in buttons:
+                action_button.setProperty("_action_visible", True)
+            branch_btn.setProperty("_action_visible", bool(self.window.config.expert_mode))
+            self._extension_action_cells.append((actions, buttons))
+            # The first responsive pass chooses the final number of grid
+            # columns once Qt has assigned the action cell its width.
+            self._layout_extension_action_cell(actions, buttons, table_width=self.extension_table.columnWidth(5))
             self.extension_table.setCellWidget(row, 5, actions)
         self.extension_table.setUpdatesEnabled(True)
+        self._queue_responsive_layout()
 
     def toggle_extension(self, path: Path) -> None:
         """Enable/disable a node pack by a reversible ``.disabled`` rename."""
