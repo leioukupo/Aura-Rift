@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QScrollBar
 
 from aura_rift.services.registry import ExtensionEntry
 from aura_rift.services.environment import TorchInfo
+from aura_rift.services import native_components
 from aura_rift.ui import main_window as window_module
 from aura_rift.ui.main_window import MainWindow
 from aura_rift.ui.theme import DARK
@@ -246,6 +247,90 @@ def test_version_tables_reflow_actions_after_large_to_compact_resize(
         page.tabs.setCurrentIndex(index)
         app.processEvents()
         assert_actions_fit(table, action_column)
+
+    window.close()
+    app.processEvents()
+
+
+def test_maintenance_native_actions_reflow_without_changing_launch_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Native component commands stay inside their cells after a resize.
+
+    This also guards the important boundary of the responsive work: a
+    geometry pass must not call a save/reset method or otherwise mutate the
+    launch configuration.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(
+        window_module.environment,
+        "dependency_status",
+        lambda *_args, **_kwargs: {"Python": "测试环境"},
+    )
+    monkeypatch.setattr(
+        window_module.environment,
+        "inspect_torch",
+        lambda *_args, **_kwargs: TorchInfo(False, detail="测试环境"),
+    )
+    monkeypatch.setattr(window_module.environment, "detect_gpu", lambda: ["测试 GPU"])
+
+    class FakeNativeComponentService:
+        def detect(self, names):
+            return [
+                {
+                    "name": name,
+                    "label": name.upper(),
+                    "installed": index % 2 == 0,
+                    "version": "1.0" if index % 2 == 0 else "",
+                    "reason": "未检测到" if index % 2 else "",
+                }
+                for index, name in enumerate(names)
+            ]
+
+    monkeypatch.setattr(native_components, "NativeComponentService", FakeNativeComponentService)
+
+    app = _application()
+    window = MainWindow()
+    window.show()
+    app.processEvents()
+    window.show_page("maintenance")
+    page = window.advanced_page
+    page.adv_tabs.setCurrentIndex(1)
+    app.processEvents()
+
+    # Expand all maintenance cards so the native card follows the same
+    # visible path as a user clicking through the page.
+    for expandable in page.findChildren(window_module.ExpandCard):
+        expandable.set_expanded(True)
+    app.processEvents()
+    before = window.config.to_dict()
+
+    for size in ((2107, 1317), (960, 640)):
+        window.resize(*size)
+        app.processEvents()
+        table = page.native_table
+        table.doItemsLayout()
+        app.processEvents()
+        viewport = table.viewport()
+        assert table.horizontalHeader().length() <= viewport.width()
+        assert not table.horizontalScrollBar().isVisible()
+        assert table.rowCount() == 4
+        for row in range(table.rowCount()):
+            index = table.model().index(row, 3)
+            cell = table.visualRect(index)
+            host = table.cellWidget(row, 3)
+            assert host is not None
+            host_rect = QRect(host.mapTo(viewport, QPoint(0, 0)), host.size())
+            assert cell.contains(host_rect.topLeft())
+            assert cell.contains(host_rect.bottomRight())
+            for button in host.findChildren(window_module.QPushButton):
+                button_rect = QRect(button.mapTo(viewport, QPoint(0, 0)), button.size())
+                assert host_rect.contains(button_rect.topLeft())
+                assert host_rect.contains(button_rect.bottomRight())
+                assert cell.contains(button_rect.topLeft())
+                assert cell.contains(button_rect.bottomRight())
+        assert window.config.to_dict() == before
 
     window.close()
     app.processEvents()

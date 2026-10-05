@@ -934,6 +934,13 @@ class AdvancedPage(QWidget):
     def __init__(self, window: "MainWindow") -> None:
         super().__init__()
         self.window = window
+        # Maintenance tables contain QWidget cell editors whose geometry is
+        # not recalculated by QTableWidget when the top-level window changes
+        # size.  Keep the responsive state local to this page so a DPI change
+        # cannot alter any persisted launch option.
+        self._maintenance_layout_pending = False
+        self._maintenance_delayed_pending = False
+        self._native_action_cells: list[tuple[QWidget, list[QPushButton]]] = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -1004,6 +1011,145 @@ class AdvancedPage(QWidget):
         self.restore_defaults = self.reset_launch_options
         self.show_command = self.show_launch_command
         self.open_shell = self.open_command_shell
+
+        if hasattr(self, "native_table"):
+            self.native_table.installEventFilter(self)
+            self._queue_maintenance_layout()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """Reflow maintenance tables after a window or DPI size change.
+
+        The maintenance page is scrollable, but its native-component table
+        must still fit the available viewport.  Deferring the pass lets Qt
+        finish laying out the scroll area before column widths are measured.
+        """
+        super().resizeEvent(event)
+        self._queue_maintenance_layout()
+
+    def eventFilter(self, watched, event) -> bool:
+        table = getattr(self, "native_table", None)
+        is_action_cell = any(
+            watched is cell for cell, _buttons in getattr(self, "_native_action_cells", [])
+        )
+        if event.type() == QEvent.Resize and (watched is table or is_action_cell):
+            self._queue_maintenance_layout()
+            if is_action_cell and not self._maintenance_delayed_pending:
+                self._maintenance_delayed_pending = True
+                QTimer.singleShot(30, self._maintenance_delayed_pass)
+        return super().eventFilter(watched, event)
+
+    def _queue_maintenance_layout(self) -> None:
+        if self._maintenance_layout_pending:
+            return
+        self._maintenance_layout_pending = True
+        QTimer.singleShot(0, self._apply_maintenance_layout)
+
+    def _maintenance_delayed_pass(self) -> None:
+        self._maintenance_delayed_pending = False
+        self._queue_maintenance_layout()
+
+    @staticmethod
+    def _maintenance_viewport_width(table: QTableWidget) -> int:
+        width = table.viewport().width()
+        if width <= 0:
+            width = table.width() - table.verticalHeader().width()
+        return max(1, int(width))
+
+    @staticmethod
+    def _maintenance_widths(available: int, minimums: list[int], ratios: list[float]) -> list[int]:
+        """Distribute a table viewport without creating a horizontal bar."""
+        count = len(minimums)
+        if count == 0:
+            return []
+        available = max(count, int(available))
+        mins = [max(1, int(value)) for value in minimums]
+        minimum_total = sum(mins)
+        if available < minimum_total:
+            scale = available / float(minimum_total)
+            widths = [max(1, int(value * scale)) for value in mins]
+        else:
+            extra = available - minimum_total
+            weights = [max(0.0, float(value)) for value in ratios]
+            total = sum(weights) or float(count)
+            widths = [base + int(extra * (weight / total)) for base, weight in zip(mins, weights)]
+        pivot = max(range(count), key=lambda index: widths[index])
+        widths[pivot] = max(1, widths[pivot] + available - sum(widths))
+        return widths
+
+    def _apply_maintenance_layout(self) -> None:
+        self._maintenance_layout_pending = False
+        table = getattr(self, "native_table", None)
+        if table is None:
+            return
+        width = self._maintenance_viewport_width(table)
+        buttons = [
+            button
+            for _cell, cell_buttons in self._native_action_cells
+            for button in cell_buttons
+            if button.isVisible() or button.property("_action_visible") is not False
+        ]
+        preferred_action = max(
+            (button.sizeHint().width() + 12 for button in buttons),
+            default=112,
+        )
+        # Keep the command button at least as wide as its current style hint
+        # whenever the viewport permits.  If the viewport is smaller than
+        # the semantic minimums, the informational columns are proportionally
+        # compressed instead of allowing a stale action width to overflow.
+        info_minimum = 82 + 110 + 78
+        action_width = max(112, preferred_action)
+        if width < info_minimum + action_width:
+            action_width = max(1, min(action_width, width - 3))
+        remaining = max(3, width - action_width)
+        columns = self._maintenance_widths(
+            remaining,
+            [82, 110, 78],
+            [0.18, 0.52, 0.30],
+        ) + [action_width]
+        header = table.horizontalHeader()
+        for index in range(table.columnCount()):
+            header.setSectionResizeMode(index, QHeaderView.Fixed)
+        for index, column_width in enumerate(columns):
+            table.setColumnWidth(index, max(1, int(column_width)))
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        table.setWordWrap(True)
+        self._reflow_native_actions()
+        table.updateGeometries()
+        table.doItemsLayout()
+
+    def _reflow_native_actions(self) -> None:
+        table = getattr(self, "native_table", None)
+        if table is None:
+            return
+        for row, (cell, buttons) in enumerate(self._native_action_cells):
+            visible = [button for button in buttons if button.property("_action_visible") is not False]
+            if not visible:
+                continue
+            layout = cell.layout()
+            if not isinstance(layout, QGridLayout):
+                continue
+            while layout.count():
+                item = layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(cell)
+            width = max(1, table.columnWidth(3) - 4)
+            preferred = max(
+                (button.sizeHint().width() + 12 for button in visible),
+                default=112,
+            )
+            columns = max(1, min(len(visible), max(1, (width + 4) // max(64, preferred))))
+            for column in range(max(1, len(visible))):
+                layout.setColumnStretch(column, 1 if column < columns else 0)
+            for index, button in enumerate(visible):
+                layout.addWidget(button, index // columns, index % columns)
+            rows = (len(visible) + columns - 1) // columns
+            button_height = max((button.sizeHint().height() for button in visible), default=24)
+            # QTableWidget reserves roughly 15px outside the cell widget and
+            # the cell layout contributes another 4px of margins.  Include
+            # that space so the actual button, rather than only its host,
+            # remains at least as tall as its style hint at high DPI.
+            table.setRowHeight(row, max(54, rows * button_height + (rows + 1) * 4 + 12))
 
     def on_advanced_tab_changed(self, index: int) -> None:
         self._adv_tabs_index = index
@@ -1721,12 +1867,17 @@ class AdvancedPage(QWidget):
         native_root.addWidget(label("Git、FFmpeg、CMake、Ninja 仅显示 Linux 包管理器命令；执行前会在可见终端中请求权限。", 12))
         self.native_table = QTableWidget(0, 4)
         self.native_table.setHorizontalHeaderLabels(["组件", "状态", "版本", "操作"])
-        self.native_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.native_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.native_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.native_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        # The final widths are assigned by ``_apply_maintenance_layout``.
+        # Fixed sections prevent QHeaderView from restoring a stale width
+        # after a desktop-to-laptop or fractional-DPI resize.
+        for column in range(4):
+            self.native_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Fixed)
+        self.native_table.horizontalHeader().setMinimumSectionSize(1)
         self.native_table.verticalHeader().setVisible(False)
         self.native_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.native_table.setWordWrap(True)
+        self.native_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.native_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         native_root.addWidget(self.native_table)
         native_card.add_widget(native_body)
         root.addWidget(native_card)
@@ -1973,6 +2124,7 @@ class AdvancedPage(QWidget):
         except Exception as exc:
             statuses = [{"name": "检测失败", "reason": str(exc), "installed": False}]
             service = None
+        self._native_action_cells.clear()
         self.native_table.setRowCount(len(statuses))
         for row, item in enumerate(statuses):
             if isinstance(item, dict):
@@ -1992,14 +2144,16 @@ class AdvancedPage(QWidget):
             self.native_table.setItem(row, 2, QTableWidgetItem(str(version)))
             if service is not None:
                 action = QWidget()
-                action_layout = QHBoxLayout(action)
+                action.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                action_layout = QGridLayout(action)
                 action_layout.setContentsMargins(2, 2, 2, 2)
+                action_layout.setHorizontalSpacing(4)
+                action_layout.setVerticalSpacing(4)
                 if not installed:
                     button = QPushButton("安装命令")
                     button.clicked.connect(
                         lambda _=False, c=component, svc=service: self._show_native_command(svc, c)
                     )
-                    action_layout.addWidget(button)
                 else:
                     button = QPushButton("卸载命令")
                     button.clicked.connect(
@@ -2007,10 +2161,17 @@ class AdvancedPage(QWidget):
                             svc, c, uninstall=True
                         )
                     )
-                    action_layout.addWidget(button)
+                button.setProperty("actionButton", True)
+                button.setProperty("_action_visible", True)
+                button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                button.setMinimumSize(0, 0)
+                action_layout.addWidget(button, 0, 0)
+                action.installEventFilter(self)
+                self._native_action_cells.append((action, [button]))
                 self.native_table.setCellWidget(row, 3, action)
             else:
                 self.native_table.setItem(row, 3, QTableWidgetItem("—"))
+        self._queue_maintenance_layout()
 
     def _show_native_command(self, service, component: str, uninstall: bool = False) -> None:
         try:
